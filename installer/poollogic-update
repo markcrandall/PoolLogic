@@ -1,0 +1,21 @@
+#!/usr/bin/env bash
+# Update PoolLogic from GitHub and restart the bridge. Run with sudo.
+set -euo pipefail
+
+APP_USER="pi"
+INSTALL_DIR="/home/${APP_USER}/PoolLogic"
+
+[ "$(id -u)" -eq 0 ] || { echo "Run with sudo: sudo poollogic-update"; exit 1; }
+
+echo "Pulling latest PoolLogic..."
+sudo -u "$APP_USER" git -C "$INSTALL_DIR" pull --ff-only
+sudo -u "$APP_USER" "$INSTALL_DIR/.venv/bin/pip" install -q -r "$INSTALL_DIR/bridge/requirements.txt"
+
+systemctl restart poollogic
+sleep 3
+if curl -fsS http://localhost:8080/api/state >/dev/null 2>&1; then
+  echo "PoolLogic updated and running."
+else
+  echo "Updated, but the bridge is not answering — check: journalctl -u poollogic -n 50"
+  exit 1
+fi

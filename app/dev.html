@@ -1,0 +1,46 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>PoolLogic dev tools</title>
+  <style>
+    body { font-family: system-ui, sans-serif; margin: 1rem; max-width: 30rem; }
+    h1 { font-size: 1.1rem; }
+    button { display: block; width: 100%; margin: 0.4rem 0; padding: 0.6rem; font-size: 1rem; }
+    #status { font-weight: bold; }
+    .down { color: #b00020; }
+  </style>
+</head>
+<body>
+  <h1>PoolLogic dev tools (mock only)</h1>
+  <p>Bridge: <span id="status">…</span> — <a href="./">open app</a></p>
+  <button onclick="post('/api/mock/pool_link', {up: false})">Drop pool link</button>
+  <button onclick="post('/api/mock/pool_link', {up: true})">Restore pool link</button>
+  <button onclick="post('/api/mock/command_timeout', {enabled: true})">Stall commands</button>
+  <button onclick="post('/api/mock/command_timeout', {enabled: false})">Unstall commands</button>
+  <script>
+    async function post(url, body) {
+      const res = await fetch(url, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(body),
+      });
+      if (!res.ok) alert(url + " -> " + res.status);
+    }
+    async function poll() {
+      const el = document.getElementById("status");
+      try {
+        const s = await (await fetch("api/state", { cache: "no-store" })).json();
+        el.textContent = s.comStatus;
+        el.className = s.comStatus === "ok" ? "" : "down";
+      } catch {
+        el.textContent = "bridge unreachable";
+        el.className = "down";
+      }
+    }
+    poll();
+    setInterval(poll, 2000);
+  </script>
+</body>
+</html>

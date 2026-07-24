@@ -1,0 +1,285 @@
+# PoolLogic — Design Document
+
+A family-facing web app for controlling a Pentair pool system over home wifi.
+PWA client (HTML/JS, FSM-driven) + thin Python bridge speaking the ScreenLogic
+protocol. High-trust home environment: anyone on the wifi may use it.
+
+Decided 2026-07-21 after design discussion. This document is the spec; code
+follows it.
+
+---
+
+## 1. System architecture
+
+```
+Phones / tablets / laptops        Bridge host (dev PC now,          Pool equipment
+                                  turnkey box later)
+┌──────────────────────┐  HTTP/JSON  ┌───────────────────────┐  ScreenLogic  ┌─────────┐
+│ PoolLogic PWA        │ ──────────> │ bridge.py             │  TCP (1 conn) │ Adapter │──RS-485──> Panel
+│ (HTML/JS, FSM+store) │  poll ~5s   │ screenlogicpy+aiohttp │ ────────────> │         │
+└──────────────────────┘             │ also serves PWA files │               └─────────┘
+                                     └───────────────────────┘
+```
+
+**Why a bridge (settled):** Browsers cannot open raw TCP/UDP sockets; the
+ScreenLogic adapter speaks only a raw binary TCP protocol with UDP discovery.
+Additionally the adapter tolerates only a few concurrent clients (shared with
+the official Pentair app), so a single multiplexing connection is correct even
+beyond the browser limitation. The official Pentair app needs no bridge because
+it is native code with raw socket access — a capability web pages do not have.
+
+**Single origin:** one process, one port. `http://<host>:8080/` serves the PWA
+static files; `/api/*` serves JSON. No CORS, one URL for the family.
+
+**Deployment:** develop and run on the dev PC (same wifi as the adapter).
+Deployment target decided later; preference is turnkey (e.g., preloaded-SD Pi
+kit). Nothing in the design changes between hosts.
+
+**Hosting constraints (settled):** GitHub Pages is not usable — an HTTPS page
+cannot make requests to the LAN (mixed content), and GitHub cannot reach the
+pool. Files are served from the bridge over plain LAN HTTP. Consequence: no
+service worker (requires secure context). Offline caching is worthless for
+this app anyway. Manifest + icons are kept so add-to-home-screen gives a real
+icon and title on iOS/Android.
+
+**Reference projects:**
+- Protocol library: https://github.com/dieselrabbit/screenlogicpy (used by the bridge)
+- Protocol documentation: https://github.com/ceisenach/screenlogic_over_ip
+- PWA structure model: https://github.com/markcrandall/SimpleShoppingList
+- FSM idiom: https://aic-lab.com/systemverilog/FSM/
+
+---
+
+## 2. Feature scope (settled)
+
+| Control | UI | Maps to |
+|---|---|---|
+| Pool / Spa mode | two-position switch | spa circuit on/off (panel handles valve interlock) |
+| Heater | On/Off toggle + setpoint stepper per active body | heat mode Off(0) / Heater(3); SetHeatPoint |
+| Spa auto-heat | selecting Spa mode also sends heater-on (spa setpoint); leaving Spa sends heater-off. App-owned so a mid-session Heater-Off sticks. REQUIRES disabling the panel's "Spa Manual Heat" setting (verified 2026-07-22: with it enabled the controller re-asserts heat ~15s after any off command while the spa circuit is on) | app-side, in the mode control's send |
+| Setpoint bounds | 40–102 °F, enforced bridge-side AND clamped in UI (lowered from 75 on 2026-07-22 to match the pool body's real setpoint range) | |
+| Jets | toggle | jets circuit |
+| Cleaner | toggle | cleaner circuit |
+| Spillway | toggle | spillway circuit |
+| Pool light | toggle | pool light circuit |
+| Spa light | toggle | spa light circuit |
+| Light show | picker: **White** (non-color) / **Caribbean** / **Party** (added 2026-07-22) | IntelliBrite color command (applies to IntelliBrite lights collectively) |
+| Temperatures | read-only banner: air / pool / spa; a water temp renders muted with a "last reading" hint while its body isn't circulating (the controller only measures flowing water, so idle-body temps are frozen at the last circulated reading) | polled; pool circuit (505) is in the payload read-only to drive this |
+| Com status | header dot + banners; manual Reconnect when offline | see Connection FSM |
+
+No solar modes, no schedules, no chemistry — out of scope by decision.
+Heat control is deliberately "turn on + setpoint / turn off" only.
+
+### Bridge-host status LED (added 2026-07-22)
+
+`bridge/led.py` drives a status LED on the deployment host (CanaKit Pi Zero
+2 W kit). Configured via `statusLed` in config.json; `mode: auto` uses the
+Pi's onboard ACT LED via sysfs (no extra hardware; needs root or a udev rule
+for /sys/class/leds writes) and resolves to a no-op on dev machines. `mode:
+gpio` supports one external LED (`pin`) or a green/red pair (`okPin` /
+`downPin`) once the kit's unpopulated GPIO header is soldered on
+(gpiozero; LEDs + 330Ω resistors not included in the kit).
+
+Single-LED patterns: rapid blink = starting; heartbeat flash every 3s =
+pool link OK (distinguishes a live bridge from a hung one, unlike solid-on);
+1s blink = pool unreachable; dark = bridge not running. Dual-LED: green
+heartbeat = OK, solid red = pool unreachable.
+
+---
+
+## 3. Bridge (Python, `bridge/`)
+
+~200 lines. Responsibilities:
+
+- Holds the **single** adapter connection via `screenlogicpy`'s async
+  `ScreenLogicGateway`. Uses its push subscription for freshness plus a slow
+  safety poll. Own retry loop with backoff if the pool link drops — the PWA
+  never talks to the adapter.
+- Caches the latest pool state; every `/api/state` answer is served from cache
+  instantly.
+- After any command, triggers an immediate state refresh so clients' PENDING
+  controls resolve fast.
+- **Two-hop honesty:** every response carries `comStatus: "ok" |
+  "pool_unreachable"` and `lastPoolContact` (ISO timestamp) so the app can
+  distinguish "bridge unreachable" (HTTP fails) from "bridge up, pool link
+  down" (HTTP ok, comStatus bad). The user remedy differs.
+- **Config file** (`bridge/config.json`): adapter IP (or UDP auto-discover),
+  HTTP port, friendly-name → circuit-ID map (discovered once via
+  `screenlogicpy` CLI at setup), setpoint bounds, poll intervals.
+- **`--mock` flag:** serves a simulated pool — temps drift, commands succeed
+  after a realistic delay, failure injection endpoints for testing FSM edges
+  (drop bridge, drop pool link, command timeout). The entire PWA is built and
+  tested against mock before touching real equipment.
+
+### API contract
+
+```
+GET  /api/state → {
+  comStatus: "ok" | "pool_unreachable",
+  lastPoolContact: "2026-07-21T14:03:22",
+  airTemp: 88, poolTemp: 84, spaTemp: 101,
+  circuits: { pool: bool,   // read-only: drives pool-temp staleness
+              spa: bool, jets: bool, cleaner: bool, spillway: bool,
+              poolLight: bool, spaLight: bool },
+  heat: { pool: { setpoint: 78, on: bool, active: bool },
+          spa:  { setpoint: 101, on: bool, active: bool } },
+  lightShow: "white" | "caribbean" | "party" | null
+}
+POST /api/circuit/{name}        {"on": true}          → 200 {} | 4xx/5xx {error}
+POST /api/heat/{body}/on        {"setpoint": 101}     → turns heater on (mode 3) and sets temp
+POST /api/heat/{body}/off       {}                    → heat mode 0
+POST /api/heat/{body}/setpoint  {"temp": 101}         → setpoint only (75–102 clamped)
+POST /api/lights                {"show": "white" | "caribbean" | "party"}
+```
+
+`{name}` ∈ spa, jets, cleaner, spillway, poolLight, spaLight.
+`{body}` ∈ pool, spa. Unknown names → 404. Out-of-bounds temp → 400.
+
+---
+
+## 4. Client FSMs (aic-lab three-block Moore idiom, in JS)
+
+Translation of the SystemVerilog pattern:
+
+| SV block | JS realization |
+|---|---|
+| Next-state logic (`always_comb`) | pure function `transition(state, event) → nextState`, explicit table |
+| State register (`always_ff`) | the store (SimpleShoppingList `store` pattern); only the register applies transitions |
+| Output logic (Moore) | render derived **only** from current state; handlers never touch the DOM, they dispatch events |
+| `default` case | any (state, event) pair not in the table is a logged no-op — nothing can wedge the app |
+| Enumerated semantic names | `ONLINE`, `RETRY_WAIT`, … as frozen string constants |
+
+### 4.1 Connection FSM (one instance)
+
+States: `BOOTING, ONLINE, DEGRADED, RETRY_WAIT, RECONNECTING, OFFLINE`
+Events: `POLL_OK, POLL_POOL_DOWN, POLL_FAIL, TIMER, RECONNECT_TAPPED, APP_WAKE`
+
+| State | Event | Next | Action / notes |
+|---|---|---|---|
+| BOOTING | POLL_OK | ONLINE | first fetch on load |
+| BOOTING | POLL_POOL_DOWN | DEGRADED | |
+| BOOTING | POLL_FAIL | RETRY_WAIT | retryCount = 1 |
+| ONLINE | POLL_OK | ONLINE | refresh data |
+| ONLINE | POLL_POOL_DOWN | DEGRADED | |
+| ONLINE | POLL_FAIL | RETRY_WAIT | retryCount = 1 |
+| DEGRADED | POLL_OK | ONLINE | bridge recovered pool link itself |
+| DEGRADED | POLL_POOL_DOWN | DEGRADED | |
+| DEGRADED | POLL_FAIL | RETRY_WAIT | retryCount = 1 |
+| RETRY_WAIT | TIMER | RECONNECTING | backoff schedule 2, 4, 8, 15, 30 s |
+| RETRY_WAIT | POLL_OK / POLL_POOL_DOWN | ONLINE / DEGRADED | wake-triggered poll honored (added 2026-07-24) |
+| RETRY_WAIT | POLL_FAIL | RETRY_WAIT | count unchanged; backoff re-arms |
+| RECONNECTING | POLL_OK | ONLINE | retryCount reset |
+| RECONNECTING | POLL_POOL_DOWN | DEGRADED | retryCount reset |
+| RECONNECTING | POLL_FAIL (count < 5) | RETRY_WAIT | retryCount++ |
+| RECONNECTING | POLL_FAIL (count = 5) | OFFLINE | gave up |
+| OFFLINE | RECONNECT_TAPPED | RECONNECTING | manual reconnect (requirement) |
+| OFFLINE | APP_WAKE | RECONNECTING | phone unlocked / tab visible again |
+| (any) | APP_WAKE | (same) | immediate poll fired |
+
+Moore outputs:
+
+| State | Header dot | Controls | Extra |
+|---|---|---|---|
+| ONLINE | green | enabled | |
+| DEGRADED | amber | disabled | banner "Pool link down — server retrying"; temps greyed with age |
+| RETRY_WAIT / RECONNECTING | amber | disabled | "Reconnecting (n/5)…"; last-known temps greyed |
+| OFFLINE | red | disabled | banner + **Reconnect** button |
+
+Polling: `GET /api/state` every 5 s while page visible; paused when hidden
+(Page Visibility API); one immediate poll on wake.
+
+### 4.2 Command FSM (one instance per control)
+
+States: `IDLE, PENDING, FAILED`
+
+| State | Event | Next | Action / notes |
+|---|---|---|---|
+| IDLE | TAP | PENDING | POST sent; spinner on control; further taps ignored |
+| PENDING | poll confirms target value | IDLE | **the pool is the source of truth** |
+| PENDING | HTTP error | FAILED | |
+| PENDING | 10 s timeout without confirmation | FAILED | |
+| FAILED | 3 s auto | IDLE | toast shown; UI reverts to actual polled state |
+
+Multi-phone coherence falls out for free: every device renders whatever truth
+the next poll delivers (e.g., spouse turns on spa → your phone shows it within
+one poll cycle).
+
+Hardening (2026-07-24 review): confirmation only runs on `comStatus: ok`
+polls (cached pool-down data must not confirm commands); heater/setpoint
+targets carry the body captured at tap time (`{body, on}` / `{body, temp}`)
+with per-control `confirmed()` predicates, so a mid-flight mode change can't
+redirect a command or its confirmation; heater/stepper/slider lock while a
+mode (or their own) command is pending; UI notifies no longer reset the poll
+timer (only connection transitions do); command POSTs get 8s (vs 4s poll
+timeout) to survive the bridge's adapter-lock contention.
+
+---
+
+## 5. PWA (`app/`)
+
+Modeled on SimpleShoppingList's structure and store idiom. Single screen, no
+tabs.
+
+```
+┌────────────────────────────────────┐
+│ PoolLogic                       ●  │   ← com status dot
+├────────────────────────────────────┤
+│  Air 88°   Pool 84°   Spa 101°     │   ← greyed + "as of 2:03 PM" when stale
+├────────────────────────────────────┤
+│  Mode      [ POOL ]■[ SPA ]        │   ← two-position switch
+│  Heater    [ OFF/ON ]  ◄ 101° ►    │   ← stepper for active body, 75–102
+│  Jets      [ OFF/ON ]              │
+│  Cleaner   [ OFF/ON ]              │
+│  Spillway  [ OFF/ON ]              │
+│  Pool Light[ OFF/ON ]              │
+│  Spa Light [ OFF/ON ]              │
+│  Light Show  ( White )( Caribbean )│   ← visible when a light is on
+└────────────────────────────────────┘
+```
+
+Big touch targets (poolside, wet hands). Manifest + 192/512 icons for
+add-to-home-screen; **no service worker** (see §1).
+
+### File layout
+
+```
+PoolLogic/
+├── DESIGN.md
+├── app/
+│   ├── index.html
+│   ├── manifest.json
+│   ├── icons/icon-192.png, icon-512.png
+│   ├── css/styles.css
+│   └── js/
+│       ├── app.js              # boot, poll scheduler, visibility handling
+│       ├── state.js            # store = state register (SimpleShoppingList idiom)
+│       ├── api.js              # fetch wrappers → events, never state
+│       ├── fsm/
+│       │   ├── connection.js   # table + transition() (pure)
+│       │   └── command.js      # per-control machines (pure)
+│       └── views/panel.js      # Moore output logic: render(state)
+└── bridge/
+    ├── bridge.py
+    ├── mock.py
+    ├── config.json
+    └── requirements.txt        # screenlogicpy, aiohttp
+```
+
+---
+
+## 6. Build milestones
+
+1. **M1 — bridge skeleton + mock**: `GET /api/state` + static serving, `--mock`
+   with drifting temps and failure injection. Verified with curl/browser.
+2. **M2 — PWA skeleton + connection FSM** against mock: temps banner, com dot,
+   full reconnect/backoff/OFFLINE/manual-reconnect behavior exercised via
+   failure injection.
+3. **M3 — controls + command FSMs** against mock: all toggles, heater on/off +
+   setpoint, light show picker; PENDING/FAILED paths exercised.
+4. **M4 — real pool**: circuit-ID discovery via screenlogicpy CLI, fill
+   config.json, integration test with actual equipment (official Pentair app
+   confirmed working on the wifi, so adapter is present and reachable).
+5. **M5 — polish + deployment**: icons, styling pass, add-to-home-screen check
+   on iOS/Android, runbook for moving the bridge to the turnkey box.
+
+Each milestone is independently demonstrable; M1–M3 require no pool access.

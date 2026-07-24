@@ -1,0 +1,17 @@
+{
+  "adapterIp": "192.168.1.25",
+  "httpPort": 8080,
+  "setpointMin": 40,
+  "setpointMax": 102,
+  "adapterPollSeconds": 10,
+  "statusLed": { "mode": "auto" },
+  "circuitIds": {
+    "pool": 505,
+    "spa": 500,
+    "jets": 501,
+    "cleaner": 510,
+    "spillway": 511,
+    "poolLight": 502,
+    "spaLight": 503
+  }
+}
