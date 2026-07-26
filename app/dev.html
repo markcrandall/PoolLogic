@@ -19,6 +19,8 @@
   <button onclick="post('/api/mock/pool_link', {up: true})">Restore pool link</button>
   <button onclick="post('/api/mock/command_timeout', {enabled: true})">Stall commands</button>
   <button onclick="post('/api/mock/command_timeout', {enabled: false})">Unstall commands</button>
+  <button onclick="post('/api/mock/freeze', {on: true})">Freeze protection ON</button>
+  <button onclick="post('/api/mock/freeze', {on: false})">Freeze protection OFF</button>
   <script>
     async function post(url, body) {
       const res = await fetch(url, {

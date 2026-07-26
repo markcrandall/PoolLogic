@@ -4,6 +4,7 @@
   "setpointMin": 40,
   "setpointMax": 102,
   "adapterPollSeconds": 10,
+  "allowedHosts": ["poollogic"],
   "statusLed": { "mode": "auto" },
   "circuitIds": {
     "pool": 505,

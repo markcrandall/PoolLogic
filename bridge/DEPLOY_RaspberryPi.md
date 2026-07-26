@@ -224,4 +224,12 @@ stale-cache surprises).
 
 Config reference (`bridge/config.json`): `adapterIp`, `httpPort` (8080),
 setpoint bounds (40–102), `circuitIds` (this pool's ScreenLogic circuit
-numbers — also defines which circuits the API accepts), `statusLed`.
+numbers — also defines which circuits the API accepts), `statusLed`,
+`allowedHosts`.
+
+`allowedHosts` lists the hostnames the bridge will answer to, on top of its own
+hostname, `localhost`, and any bare IP address — a DNS-rebinding guard (see
+DESIGN.md). `.local` / `.lan` / `.home` suffixes on a listed name are accepted
+automatically, so `["poollogic"]` covers `poollogic.local` too. If the family
+URL ever returns **403**, this is why: check `journalctl -u poollogic` for a
+`rejected request with Host=…` line and add that name here.

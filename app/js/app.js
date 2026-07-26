@@ -8,6 +8,11 @@ import { ConnState, ConnEvent, BACKOFF_SECONDS } from "./fsm/connection.js";
 import { render, bindHandlers } from "./views/panel.js";
 
 const POLL_INTERVAL_MS = 5000;
+// Comfortably past the 4s fetch timeout, so a normal reconnect poll always
+// settles and transitions out (cancelling this) long before it fires. It only
+// matters if a poll never settles at all, which would otherwise strand
+// RECONNECTING — the one state with no timer of its own.
+const RECONNECT_WATCHDOG_MS = 10000;
 
 let timer = null;
 let pollInFlight = false;
@@ -32,7 +37,15 @@ function schedule() {
       timer = setTimeout(poll, POLL_INTERVAL_MS);
       break;
     case ConnState.BOOTING:
+      poll();
+      break;
     case ConnState.RECONNECTING:
+      // Arm before polling: if the poll settles (it always should) the
+      // resulting transition re-enters schedule(), which clears this.
+      timer = setTimeout(
+        () => store.dispatchConn(ConnEvent.TIMER),
+        RECONNECT_WATCHDOG_MS
+      );
       poll();
       break;
     case ConnState.RETRY_WAIT: {

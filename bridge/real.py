@@ -5,6 +5,8 @@ pool_unreachable and the run loop reconnects with backoff.
 """
 
 import asyncio
+import time
+from contextlib import suppress
 from datetime import datetime
 
 from screenlogicpy import ScreenLogicGateway
@@ -40,12 +42,39 @@ class RealBackend:
         self.gateway = ScreenLogicGateway()
         self.pool_up = False
         self._last_contact = None
+        # Measured on the monotonic clock, not the wall clock: a headless Pi
+        # with no RTC can step its wall clock by hours when NTP first lands,
+        # which would make the readings look newer (or wildly older) than they
+        # are. Clients get an age, so no clock has to agree with any other.
+        self._last_contact_mono = None
         self._light_show = None  # adapter doesn't report the active show; echo ours
         self._lock = asyncio.Lock()
         self._refresh_task = None
+        self._run_task = None
 
     def start(self):
-        asyncio.get_event_loop().create_task(self._run_loop())
+        self._run_task = asyncio.get_event_loop().create_task(self._run_loop())
+
+    async def close(self):
+        """Hand the adapter's connection slot back deliberately.
+
+        Process exit closes the socket regardless — the kernel sends FIN even
+        on SIGKILL — so this is determinism, not a leak fix: the slot is
+        released by an explicit disconnect at a known point rather than as a
+        side effect of teardown ordering. The case that genuinely strands a
+        slot (power cut, wifi drop) runs no code at all and is beyond reach
+        from here; the adapter reaps those on its own timeout.
+        """
+        for task in (self._run_task, self._refresh_task):
+            if task is not None:
+                task.cancel()
+                with suppress(asyncio.CancelledError):
+                    await task
+        self._run_task = self._refresh_task = None
+        async with self._lock:
+            with suppress(Exception):  # already down / never connected
+                await self.gateway.async_disconnect(force=True)
+        self.pool_up = False
 
     async def _run_loop(self):
         backoff = RECONNECT_BACKOFF_START
@@ -72,6 +101,7 @@ class RealBackend:
             await self.gateway.async_update()
         self.pool_up = True
         self._last_contact = _now()
+        self._last_contact_mono = time.monotonic()
 
     # -- Queries ----------------------------------------------------------
 
@@ -92,11 +122,31 @@ class RealBackend:
                 != HEAT_STATE.OFF.value,
             }
 
-        temps = d.get("controller", {}).get("sensor", {})
+        # The controller sensor block carries the temperatures and the
+        # panel-level freeze flag. Freeze mode is reported for the controller
+        # as a whole, not per circuit: the panel tells us it is protecting
+        # itself, never which circuits it forced on.
+        sensor = d.get("controller", {}).get("sensor", {})
         return {
             "comStatus": "ok" if self.pool_up else "pool_unreachable",
             "lastPoolContact": self._last_contact,
-            "airTemp": temps.get("air_temperature", {}).get("value"),
+            # How old the readings below actually are. While the pool link is
+            # down this keeps climbing even though /api/state still answers
+            # 200 from cache, which is the only way the client can tell a
+            # fresh poll from fresh data.
+            "poolAgeSeconds": self._pool_age(),
+            "freezeMode": bool(sensor.get("freeze_mode", {}).get("value")),
+            # Valve-delay bytes, passed through RAW and deliberately
+            # uninterpreted. Circuit flags follow the relay, but actuators take
+            # ~20-30s to rotate, so "spa on" precedes water actually reaching
+            # the spa. screenlogicpy reads these as bare bytes with no enum, so
+            # the encoding (boolean / countdown / bitfield) is still unknown —
+            # observe them across a real pool->spa switch before any UI reads
+            # them. Nothing consumes these yet.
+            "poolDelay": sensor.get("pool_delay", {}).get("value"),
+            "spaDelay": sensor.get("spa_delay", {}).get("value"),
+            "cleanerDelay": sensor.get("cleaner_delay", {}).get("value"),
+            "airTemp": sensor.get("air_temperature", {}).get("value"),
             "poolTemp": d.get("body", {}).get(0, {})
             .get("last_temperature", {}).get("value"),
             "spaTemp": d.get("body", {}).get(1, {})
@@ -105,6 +155,11 @@ class RealBackend:
             "heat": heat,
             "lightShow": self._light_show,
         }
+
+    def _pool_age(self):
+        if self._last_contact_mono is None:
+            return None  # never reached the adapter since boot
+        return int(time.monotonic() - self._last_contact_mono)
 
     # -- Commands ---------------------------------------------------------
 

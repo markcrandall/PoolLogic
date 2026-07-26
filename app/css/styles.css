@@ -3,6 +3,7 @@
   --green: #1d9e4b;
   --amber: #d98c00;
   --red: #c62828;
+  --freeze: #0b6ea8;
   --bg: #f4f8fb;
   --card: #ffffff;
   --text: #16323f;
@@ -63,6 +64,24 @@ body {
 .status-banner.visible { display: block; }
 .status-banner.amber { background: var(--amber); }
 .status-banner.red { background: var(--red); }
+
+/* Panel freeze protection. Distinct from the connection banner (and can show
+   alongside it): nothing is wrong, the pool is protecting itself. */
+.freeze-banner {
+  display: none;
+  padding: 0.6rem 1rem;
+  background: var(--freeze);
+  color: #fff;
+  font-weight: 600;
+  text-align: center;
+  line-height: 1.35;
+}
+.freeze-banner.visible { display: block; }
+.freeze-banner small {
+  display: block;
+  font-weight: 500;
+  opacity: 0.9;
+}
 
 .reconnect-btn {
   display: block;

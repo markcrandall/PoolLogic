@@ -39,6 +39,18 @@ function reconnectingText(conn) {
 
 const TOGGLES = ["jets", "cleaner", "spillway", "poolLight", "spaLight"];
 
+const FREEZE_TEXT =
+  "Freeze protection is running — the pool turned equipment on by itself";
+const FREEZE_HINT = "Leave it running until the air warms up.";
+// The panel reports freeze mode for the controller as a whole, never which
+// circuits it forced on, so we cannot grey out just the affected toggles.
+// Instead every off-switch asks first while freeze is active.
+const FREEZE_CONFIRM =
+  "Freeze protection is running.\n\n" +
+  "The pool turned this on by itself to keep water moving through the " +
+  "pipes. Turning it off in freezing weather can let them freeze and " +
+  "burst.\n\nTurn it off anyway?";
+
 export function render(state) {
   const { conn, pool, lastUpdated, commands, setpointDraft } = state;
   const status = STATUS[conn.state];
@@ -59,12 +71,21 @@ export function render(state) {
 
   document.getElementById("mock-badge").classList.toggle("hidden", !pool?.mock);
 
-  renderTemps(pool, lastUpdated, live);
+  // Only trustworthy while the poll is current — a stale snapshot must not
+  // claim the pool is (or isn't) protecting itself.
+  const freeze = live && !!pool?.freezeMode;
+  const freezeBanner = document.getElementById("freeze-banner");
+  freezeBanner.innerHTML = freeze
+    ? `${FREEZE_TEXT}<small>${FREEZE_HINT}</small>`
+    : "";
+  freezeBanner.classList.toggle("visible", freeze);
+
+  renderTemps(pool, lastUpdated, live, conn.state);
   renderControls(pool, commands, setpointDraft, live);
   renderToast(commands);
 }
 
-function renderTemps(pool, lastUpdated, live) {
+function renderTemps(pool, lastUpdated, live, connState) {
   const set = (id, value) => {
     document.getElementById(id).textContent = value != null ? `${value}°` : "—";
   };
@@ -83,8 +104,19 @@ function renderTemps(pool, lastUpdated, live) {
   bodyStale("spa-temp", "spa-temp-hint", pool?.circuits?.spa);
 
   document.getElementById("temps").classList.toggle("stale", !live);
+  // Two different unknowns, two different answers. Both are pure functions of
+  // state — no clock is read here, so identical state always renders identically.
   const asOf = document.getElementById("temps-as-of");
-  if (!live && lastUpdated) {
+  if (live) {
+    asOf.textContent = "";
+  } else if (connState === ConnState.DEGRADED && pool?.poolAgeSeconds != null) {
+    // Bridge is answering, so this age arrived with the current poll and is
+    // the age of the readings themselves — which keeps climbing even though
+    // /api/state still returns 200 from cache.
+    asOf.textContent = `as of ${formatAge(pool.poolAgeSeconds)}`;
+  } else if (lastUpdated) {
+    // Bridge unreachable: no fresher age is coming, and the one in hand stopped
+    // advancing when the polls did. Say when we last heard anything instead.
     const t = lastUpdated.toLocaleTimeString([], {
       hour: "numeric",
       minute: "2-digit",
@@ -93,6 +125,16 @@ function renderTemps(pool, lastUpdated, live) {
   } else {
     asOf.textContent = "";
   }
+}
+
+function formatAge(seconds) {
+  if (seconds < 90) return "just now";
+  const mins = Math.round(seconds / 60);
+  if (mins < 60) return `${mins} min ago`;
+  const hours = Math.round(mins / 60);
+  if (hours < 24) return `${hours} hr ago`;
+  const days = Math.round(hours / 24);
+  return `${days} day${days === 1 ? "" : "s"} ago`;
 }
 
 function renderControls(pool, commands, setpointDraft, live) {
@@ -189,6 +231,14 @@ function renderToast(commands) {
 // True while the user is dragging the slider, so render doesn't fight the thumb.
 let sliderActive = false;
 
+// Freeze protection is only ever defeated deliberately. Turning equipment ON
+// is never the hazard, so only off-taps ask; returns true if the tap should be
+// dropped.
+function freezeBlocks(pool, turningOff) {
+  if (!turningOff || !pool?.freezeMode) return false;
+  return !window.confirm(FREEZE_CONFIRM);
+}
+
 export function bindHandlers() {
   const on = (id, fn) => document.getElementById(id).addEventListener("click", fn);
 
@@ -211,7 +261,13 @@ export function bindHandlers() {
   slider.addEventListener("pointerup", endDrag);
   slider.addEventListener("pointercancel", endDrag);
 
-  on("btn-mode-pool", () => tapControl("mode", "pool"));
+  // Leaving Spa switches the spa circuit off, so it goes through the same
+  // guard as the plain toggles. Entering Spa only turns things on.
+  on("btn-mode-pool", () => {
+    const pool = store.getState().pool;
+    if (freezeBlocks(pool, pool?.circuits?.spa)) return;
+    tapControl("mode", "pool");
+  });
   on("btn-mode-spa", () => tapControl("mode", "spa"));
   on("btn-heater", () => {
     const pool = store.getState().pool;
@@ -224,7 +280,10 @@ export function bindHandlers() {
   for (const id of TOGGLES) {
     on(`btn-${id}`, () => {
       const pool = store.getState().pool;
-      if (pool) tapControl(id, !CONTROLS[id].read(pool));
+      if (!pool) return;
+      const target = !CONTROLS[id].read(pool);
+      if (freezeBlocks(pool, !target)) return;
+      tapControl(id, target);
     });
   }
   on("btn-show-white", () => tapControl("lightShow", "white"));

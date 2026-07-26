@@ -97,12 +97,38 @@ heartbeat = OK, solid red = pool unreachable.
   never talks to the adapter.
 - Caches the latest pool state; every `/api/state` answer is served from cache
   instantly.
+- **Clean shutdown** (`on_cleanup`): stops the LED task, cancels the poll and
+  post-command refresh tasks, and disconnects the gateway. aiohttp handles
+  SIGTERM by default, so this runs on `systemctl restart` too. This is
+  determinism, not a leak fix — process exit closes the socket regardless (the
+  kernel sends FIN even on SIGKILL), so the adapter never holds a slot to its
+  timeout on a restart. What it does buy: the disconnect happens at a known
+  point rather than as a side effect of teardown ordering, and the ACT LED is
+  always handed back to its `mmc0` trigger instead of occasionally freezing
+  mid-flash stuck on, which would contradict the documented "dark = not
+  running". The case that genuinely strands a slot — power cut, wifi drop —
+  runs no code at all and is only reaped by the adapter's own timeout.
 - After any command, triggers an immediate state refresh so clients' PENDING
   controls resolve fast.
 - **Two-hop honesty:** every response carries `comStatus: "ok" |
   "pool_unreachable"` and `lastPoolContact` (ISO timestamp) so the app can
   distinguish "bridge unreachable" (HTTP fails) from "bridge up, pool link
   down" (HTTP ok, comStatus bad). The user remedy differs.
+- **Reading age, not poll age** (`poolAgeSeconds`): while the pool link is
+  down `/api/state` still answers 200 from cache, so a fresh *poll* is not
+  fresh *data* — the client cannot tell them apart on its own, and a
+  poll-time "as of" hint reads as current while the temperatures under it
+  are hours old. Measured on `time.monotonic()`, not the wall clock: a
+  headless Pi has no RTC and can step hours when NTP first lands. Shipping
+  an age rather than a timestamp also means the phone's clock and the Pi's
+  never have to agree — and `lastPoolContact`, being naive local time, would
+  be misread by a phone in another zone if a client ever parsed it.
+  The client shows this age only in DEGRADED, where the bridge is still
+  answering and the value therefore arrived with the current poll. Once the
+  *bridge* is unreachable the age stops advancing with the polls, so the app
+  falls back to the time of the last successful poll — a different unknown,
+  honestly labelled. Keeping both cases derived from stored state (never from
+  a clock read at render time) is what keeps the output block Moore-pure.
 - **Config file** (`bridge/config.json`): adapter IP (or UDP auto-discover),
   HTTP port, friendly-name → circuit-ID map (discovered once via
   `screenlogicpy` CLI at setup), setpoint bounds, poll intervals.
@@ -116,7 +142,9 @@ heartbeat = OK, solid red = pool unreachable.
 ```
 GET  /api/state → {
   comStatus: "ok" | "pool_unreachable",
-  lastPoolContact: "2026-07-21T14:03:22",
+  lastPoolContact: "2026-07-21T14:03:22",   // informational; clients use age
+  poolAgeSeconds: 0,  // age of the readings below (monotonic, bridge-side)
+  freezeMode: bool,   // panel-level freeze protection is engaged
   airTemp: 88, poolTemp: 84, spaTemp: 101,
   circuits: { pool: bool,   // read-only: drives pool-temp staleness
               spa: bool, jets: bool, cleaner: bool, spillway: bool,
@@ -128,12 +156,86 @@ GET  /api/state → {
 POST /api/circuit/{name}        {"on": true}          → 200 {} | 4xx/5xx {error}
 POST /api/heat/{body}/on        {"setpoint": 101}     → turns heater on (mode 3) and sets temp
 POST /api/heat/{body}/off       {}                    → heat mode 0
-POST /api/heat/{body}/setpoint  {"temp": 101}         → setpoint only (75–102 clamped)
+POST /api/heat/{body}/setpoint  {"temp": 101}         → setpoint only (config bounds, currently 40–102)
 POST /api/lights                {"show": "white" | "caribbean" | "party"}
 ```
 
 `{name}` ∈ spa, jets, cleaner, spillway, poolLight, spaLight.
 `{body}` ∈ pool, spa. Unknown names → 404. Out-of-bounds temp → 400.
+
+Mock-only: `POST /api/mock/freeze {"on": bool}` alongside the existing
+`pool_link` and `command_timeout` injectors, so freeze handling is testable
+out of season.
+
+`poolDelay` / `spaDelay` / `cleanerDelay` are raw panel bytes, passed through
+uninterpreted and **consumed by nothing yet** — see Valve lag below.
+
+### Browser-origin guards
+
+No login is a deliberate choice: anyone on the home wifi can drive the pool.
+The threat that choice does *not* cover is a web page one of their phones
+loads, and two checks (one aiohttp middleware) close it without costing the
+no-login UX — the PWA is same-origin and already satisfies both.
+
+**Require `Content-Type: application/json` on POST → 415.** A cross-site page
+can fire a POST at a guessed LAN address with no preflight, and while it cannot
+read the reply (we send no CORS headers), the command still runs. Only the CORS
+*simple* content types get through that way — `application/json` triggers a
+preflight and our `OPTIONS` returns 405. `request.json()` ignores
+`Content-Type` and parses whatever body arrives, so requiring the header is
+what actually closes it. Verified: `text/plain`, `x-www-form-urlencoded`,
+`multipart/form-data` and absent all became 415, having been 200.
+
+**Validate `Host` → 403.** DNS rebinding re-points an attacker hostname at the
+bridge to become same-origin and *read* state; the request still carries their
+hostname. Bare-IP Hosts pass (a browser sends one only when the user typed the
+address). Names must match the machine hostname, `localhost`, or
+`allowedHosts` in config.json — optionally suffixed `.local` / `.lan` /
+`.home` / `.localdomain` / `.home.arpa`.
+
+Matching only the *first* label is not enough: `poollogic.evil.com` is
+registrable and would have passed. The suffix list is closed for that reason.
+Rejections are logged (flushed — systemd buffers otherwise) because an honest
+wrong hostname and an attack look identical from outside, and a 403 on the
+family URL has to be diagnosable from `journalctl`.
+
+### Valve lag (open)
+
+Circuit flags follow the relay; valve actuators take ~20-30s to rotate. So the
+panel reports the spa circuit on — and the client resolves PENDING to IDLE —
+while water is still routing to the pool. Not incorrect (we render the pool's
+truth) but it reads as "it says it's on, why is it cold".
+
+A fixed "switching…" timer on the mode control would paper over it, but the
+panel already reports `pool_delay` / `spa_delay`, so the honest fix ends the
+switching state when the *panel* says the valves are done, keeping the pool as
+the source of truth.
+
+Blocked on one observation: screenlogicpy reads these as bare bytes
+(`status.py:52-62`) with no enum, so boolean vs countdown vs bitfield is
+unknown, and valve delay is a *configurable* panel feature — if it is off, the
+flag may never set while the actuators still take their time, which would force
+the timer fallback after all. `bridge/watch_delays.py` samples them once a
+second across a real pool→spa switch; one switch settles both questions.
+
+### Freeze protection
+
+The panel engages freeze protection on its own when air temperature nears
+freezing, switching circuits on to keep water moving. Rendered as plain
+"on" circuits this reads as someone left equipment running, and the natural
+family reaction — tapping them off — is exactly the wrong move with pipes
+full of water.
+
+`freeze_mode` (screenlogicpy `controller.sensor`, bit `0x08` of the status
+byte) is surfaced as `freezeMode` and shown as a dedicated banner, separate
+from the connection banner: nothing is wrong, the pool is protecting itself.
+
+The flag is **controller-level, not per-circuit** — the panel reports that it
+is protecting itself, never which circuits it forced on. So affected toggles
+can't be selectively disabled without guessing. Instead, while freeze is
+active, every *off*-tap confirms first (on-taps are never the hazard). This
+covers the plain circuit toggles and Pool mode, which switches the spa
+circuit off.
 
 ---
 
@@ -174,7 +276,15 @@ Events: `POLL_OK, POLL_POOL_DOWN, POLL_FAIL, TIMER, RECONNECT_TAPPED, APP_WAKE`
 | RECONNECTING | POLL_FAIL (count = 5) | OFFLINE | gave up |
 | OFFLINE | RECONNECT_TAPPED | RECONNECTING | manual reconnect (requirement) |
 | OFFLINE | APP_WAKE | RECONNECTING | phone unlocked / tab visible again |
-| (any) | APP_WAKE | (same) | immediate poll fired |
+| RECONNECTING | TIMER | RETRY_WAIT / OFFLINE | watchdog: a poll that never settled, counted as a failed attempt |
+
+`APP_WAKE` is dispatched **only** in OFFLINE (`app.js`, visibility handler).
+Waking in any other state fires an immediate `poll()` directly instead — the
+result arrives as a normal poll event. It is not an FSM row, so no
+`(any) | APP_WAKE | (same)` identity transitions exist, and none should be
+added: an unlisted (state, event) pair is meant to mean "cannot happen", and
+`APP_WAKE` genuinely cannot arrive outside OFFLINE. Rows for it would be dead
+code that dilute that guarantee.
 
 Moore outputs:
 
@@ -227,7 +337,7 @@ tabs.
 │  Air 88°   Pool 84°   Spa 101°     │   ← greyed + "as of 2:03 PM" when stale
 ├────────────────────────────────────┤
 │  Mode      [ POOL ]■[ SPA ]        │   ← two-position switch
-│  Heater    [ OFF/ON ]  ◄ 101° ►    │   ← stepper for active body, 75–102
+│  Heater    [ OFF/ON ]  ◄ 101° ►    │   ← stepper for active body, 40–102
 │  Jets      [ OFF/ON ]              │
 │  Cleaner   [ OFF/ON ]              │
 │  Spillway  [ OFF/ON ]              │

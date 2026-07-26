@@ -54,5 +54,12 @@ failure injection at `/dev.html`) so the entire client — including every
 failure path — can be exercised with no equipment. The app shows an amber
 MOCK badge whenever it's talking to the simulator.
 
+The connection FSM is pure and total, so its tests need no browser, no server
+and no dependencies — just Node's built-in runner from the repo root:
+
+```
+node --test
+```
+
 Design decisions, API contract, and the FSM transition tables are in
 [DESIGN.md](DESIGN.md).

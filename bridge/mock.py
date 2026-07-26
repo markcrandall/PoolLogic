@@ -8,6 +8,8 @@ exercise the client FSM failure paths.
 
 import asyncio
 import random
+import time
+from contextlib import suppress
 from datetime import datetime
 
 from errors import BackendUnavailable
@@ -29,8 +31,13 @@ class MockBackend:
         # Failure injection switches (driven by /api/mock/* routes)
         self.pool_link_up = True
         self.command_timeout = False
+        # Panel freeze protection. Real panels force circuits on themselves
+        # when it engages; the mock just reports the flag so the client's
+        # freeze handling can be exercised out of season.
+        self.freeze_mode = False
 
         self._last_contact = _now()
+        self._last_contact_mono = time.monotonic()
         self._temps = {"air": 88.0, "pool": 84.0, "spa": 84.0}
         self._circuits = {
             "pool": True,   # read-only in the API; drives pool-temp freshness
@@ -46,6 +53,7 @@ class MockBackend:
             "spa": {"setpoint": 101, "on": False},
         }
         self._light_show = None
+        self._drift_task = None
 
     @property
     def pool_up(self):
@@ -53,14 +61,23 @@ class MockBackend:
         return self.pool_link_up
 
     def start(self):
-        asyncio.get_event_loop().create_task(self._drift_loop())
+        self._drift_task = asyncio.get_event_loop().create_task(self._drift_loop())
+
+    async def close(self):
+        """Parity with RealBackend so bridge.py has one shutdown path."""
+        if self._drift_task is not None:
+            self._drift_task.cancel()
+            with suppress(asyncio.CancelledError):
+                await self._drift_task
+            self._drift_task = None
 
     async def _drift_loop(self):
         while True:
             await asyncio.sleep(DRIFT_PERIOD)
             if not self.pool_link_up:
-                continue
+                continue  # readings freeze and age, exactly like the real one
             self._last_contact = _now()
+            self._last_contact_mono = time.monotonic()
 
             self._temps["air"] = _walk(self._temps["air"], 0.3, 75, 95)
             self._temps["pool"] = _walk(self._temps["pool"], 0.1, 80, 88)
@@ -91,6 +108,13 @@ class MockBackend:
             "mock": True,
             "comStatus": "ok" if self.pool_link_up else "pool_unreachable",
             "lastPoolContact": self._last_contact,
+            "poolAgeSeconds": int(time.monotonic() - self._last_contact_mono),
+            "freezeMode": self.freeze_mode,
+            # Shape parity with the real backend; the mock has no valves, and
+            # the real encoding isn't known yet, so these stay 0.
+            "poolDelay": 0,
+            "spaDelay": 0,
+            "cleanerDelay": 0,
             "airTemp": round(self._temps["air"]),
             "poolTemp": round(self._temps["pool"]),
             "spaTemp": round(self._temps["spa"]),

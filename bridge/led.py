@@ -23,6 +23,7 @@ config.json:
 
 import asyncio
 import os
+from contextlib import suppress
 
 ACT_LED_PATHS = ("/sys/class/leds/ACT", "/sys/class/leds/led0")
 
@@ -110,11 +111,32 @@ class StatusLedTask:
         self.ok_led, self.down_led = _make_single(cfg)
         self.get_pool_up = get_pool_up
         self._ever_ok = False
+        self._task = None
 
     def start(self):
         if isinstance(self.ok_led, NullLed) and self.down_led is None:
             return  # nothing to drive
-        asyncio.get_event_loop().create_task(self._run())
+        self._task = asyncio.get_event_loop().create_task(self._run())
+
+    async def stop(self):
+        """Hand the ACT LED back to its normal trigger.
+
+        _run's finally already does this when the task is cancelled during
+        loop teardown, but only if cancellation happens to be awaited. Doing it
+        explicitly means a stopped bridge always leaves a dark LED under the
+        mmc0 trigger — matching the documented "dark = not running" — instead
+        of occasionally freezing mid-flash with the LED stuck on.
+        """
+        if self._task is not None:
+            self._task.cancel()
+            with suppress(asyncio.CancelledError):
+                await self._task  # _run's finally closes both LEDs
+            self._task = None
+            return
+        for led in (self.ok_led, self.down_led):
+            if led is not None:
+                with suppress(Exception):
+                    led.close()
 
     async def _run(self):
         try:
@@ -142,9 +164,12 @@ class StatusLedTask:
                     await self._flash(self.ok_led, DOWN_BLINK)
                     await asyncio.sleep(DOWN_BLINK)
         finally:
-            self.ok_led.close()
-            if self.down_led is not None:
-                self.down_led.close()
+            # Never let a failed sysfs write during shutdown escape a cancelled
+            # task and surface as a cleanup error.
+            for led in (self.ok_led, self.down_led):
+                if led is not None:
+                    with suppress(Exception):
+                        led.close()
 
     async def _flash(self, led, seconds):
         led.set(True)
