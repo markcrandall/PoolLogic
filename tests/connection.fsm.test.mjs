@@ -93,6 +93,18 @@ test("regression: repeated POLL_FAIL in RETRY_WAIT advances and reaches OFFLINE"
   assert.equal(conn.state, ConnState.OFFLINE, `stuck at ${conn.state}(${conn.retryCount})`);
 });
 
+test("attempt numbers never go backwards when TIMER follows POLL_FAIL", () => {
+  // A wake poll fails mid-backoff, then the backoff expires. The attempt the
+  // TIMER starts must not be numbered below the failure already recorded, or
+  // the banner counts down and a rung gets replayed.
+  const failed = transition({ state: ConnState.RETRY_WAIT, retryCount: 3 }, ConnEvent.POLL_FAIL);
+  assert.equal(failed.state, ConnState.RETRY_WAIT);
+  const attempt = transition(failed, ConnEvent.TIMER);
+  assert.equal(attempt.state, ConnState.RECONNECTING);
+  assert.ok(attempt.retryCount >= failed.retryCount, `${attempt.retryCount} < ${failed.retryCount}`);
+  assert.ok(attempt.retryCount > 3, "the recorded failure must still count");
+});
+
 test("regression: POLL_FAIL in RETRY_WAIT always returns a new object", () => {
   // Identity change is what re-arms the timer app.js cleared when the app was
   // hidden. Returning `conn` unchanged would leave no timer and no polling.

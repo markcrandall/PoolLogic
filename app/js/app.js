@@ -14,13 +14,27 @@ const POLL_INTERVAL_MS = 5000;
 // RECONNECTING — the one state with no timer of its own.
 const RECONNECT_WATCHDOG_MS = 10000;
 
+// One timer, always cleared before a new one is armed (see schedule), so a
+// stale timer can never be delivered against the wrong state.
 let timer = null;
 let pollInFlight = false;
+// Bumped when a poll is given up on. Its eventual answer — if it ever comes —
+// is then discarded rather than counted a second time.
+let pollGeneration = 0;
+
+function abandonPoll() {
+  pollGeneration += 1;
+  // Also releases the in-flight latch: a poll that never settles would
+  // otherwise leave it set and silently swallow every future poll.
+  pollInFlight = false;
+}
 
 async function poll() {
   if (pollInFlight) return;
   pollInFlight = true;
+  const generation = pollGeneration;
   const { event, data } = await fetchState();
+  if (generation !== pollGeneration) return; // superseded by the watchdog
   pollInFlight = false;
   store.dispatchConn(event, data);
 }
@@ -42,10 +56,13 @@ function schedule() {
     case ConnState.RECONNECTING:
       // Arm before polling: if the poll settles (it always should) the
       // resulting transition re-enters schedule(), which clears this.
-      timer = setTimeout(
-        () => store.dispatchConn(ConnEvent.TIMER),
-        RECONNECT_WATCHDOG_MS
-      );
+      timer = setTimeout(() => {
+        // The poll it was waiting on is written off here, so when the
+        // watchdog counts this as a failed attempt the poll's own late
+        // POLL_FAIL cannot count it a second time and skip a backoff rung.
+        abandonPoll();
+        store.dispatchConn(ConnEvent.TIMER);
+      }, RECONNECT_WATCHDOG_MS);
       poll();
       break;
     case ConnState.RETRY_WAIT: {
@@ -70,9 +87,16 @@ document.addEventListener("visibilitychange", () => {
   const { state } = store.getState().conn;
   if (state === ConnState.OFFLINE) {
     store.dispatchConn(ConnEvent.APP_WAKE); // OFFLINE -> RECONNECTING
-  } else {
-    poll(); // immediate refresh in any other state
+    return;
   }
+  poll(); // immediate refresh in any other state
+  // Re-arm whatever the hide cleared. Without this, waking in RECONNECTING or
+  // RETRY_WAIT leaves no timer at all — the transition that would normally
+  // re-enter schedule() only happens once that poll resolves, so a poll that
+  // never settles strands the app in exactly the state the watchdog exists to
+  // rescue. schedule() is idempotent here: for states that poll on entry its
+  // poll() call is swallowed by the in-flight latch.
+  schedule();
 });
 
 document.addEventListener("DOMContentLoaded", () => {
