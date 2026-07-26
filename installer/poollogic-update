@@ -7,9 +7,56 @@ INSTALL_DIR="/home/${APP_USER}/PoolLogic"
 
 [ "$(id -u)" -eq 0 ] || { echo "Run with sudo: sudo poollogic-update"; exit 1; }
 
+# Older installs wrote the discovered adapter IP into the tracked
+# bridge/config.json, so it stayed permanently modified and the first
+# repo-side change to that file aborted this pull ("local changes would be
+# overwritten"). Lift the local value into the git-ignored config.local.json
+# and restore the tracked copy. No-op once migrated.
+if [ -d "$INSTALL_DIR/.git" ] &&
+   ! sudo -u "$APP_USER" git -C "$INSTALL_DIR" diff --quiet -- bridge/config.json 2>/dev/null; then
+  echo "Moving machine-specific config out of the tracked config.json..."
+  python3 - "$INSTALL_DIR/bridge" <<'PY'
+import json
+import os
+import sys
+
+d = sys.argv[1]
+
+
+def read(path):
+    try:
+        with open(path, encoding="utf-8") as f:
+            return json.load(f)
+    except (OSError, ValueError):
+        return {}
+
+
+current = read(os.path.join(d, "config.json"))     # the locally-modified copy
+local = read(os.path.join(d, "config.local.json"))
+ip = current.get("adapterIp")
+if ip and local.get("adapterIp") != ip:
+    local["adapterIp"] = ip
+    with open(os.path.join(d, "config.local.json"), "w", encoding="utf-8") as f:
+        json.dump(local, f, indent=2)
+        f.write("\n")
+    print(f"  kept adapterIp {ip} in config.local.json")
+else:
+    print("  no adapterIp to preserve (formatting-only change)")
+PY
+  sudo -u "$APP_USER" git -C "$INSTALL_DIR" checkout -- bridge/config.json
+fi
+
 echo "Pulling latest PoolLogic..."
 sudo -u "$APP_USER" git -C "$INSTALL_DIR" pull --ff-only
 sudo -u "$APP_USER" "$INSTALL_DIR/.venv/bin/pip" install -q -r "$INSTALL_DIR/bridge/requirements.txt"
+
+# Refresh this script from the repo. It runs from /usr/local/bin, which is a
+# copy taken at install time, so without this an improvement to the updater
+# would never reach an existing Pi.
+if ! cmp -s "$INSTALL_DIR/installer/poollogic-update" /usr/local/bin/poollogic-update; then
+  install -m 755 "$INSTALL_DIR/installer/poollogic-update" /usr/local/bin/poollogic-update
+  echo "poollogic-update refreshed itself; the new version applies from the next run."
+fi
 
 systemctl restart poollogic
 sleep 3

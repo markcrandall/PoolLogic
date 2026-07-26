@@ -203,9 +203,48 @@ async def serve_app_file(request):
     return web.FileResponse(target, headers={"Content-Type": ctype})
 
 
+LOCAL_CONFIG_SUFFIX = ".local.json"
+
+
+def _merge_config(base, override):
+    """Override wins, one level deep so a local file can set a single circuit
+    ID or just statusLed.mode without restating the whole block."""
+    merged = dict(base)
+    for key, value in override.items():
+        if isinstance(value, dict) and isinstance(merged.get(key), dict):
+            merged[key] = {**merged[key], **value}
+        else:
+            merged[key] = value
+    return merged
+
+
 def load_config(path):
+    """config.json holds what the repo ships; config.local.json holds what this
+    particular Pi discovered, and is git-ignored.
+
+    They are separate because they have different owners. The installer used to
+    write the discovered adapter IP straight back into the tracked config.json,
+    which left every install permanently dirty in git — so the first time the
+    repo changed that file, `poollogic-update` aborted the pull on a headless
+    box. Machine state and shipped defaults must not share a file.
+    """
     with open(path, encoding="utf-8") as f:
-        return json.load(f)
+        config = json.load(f)
+
+    local_path = Path(path).with_suffix("")  # strip .json
+    local_path = local_path.with_name(local_path.name + LOCAL_CONFIG_SUFFIX)
+    if local_path.is_file():
+        try:
+            with open(local_path, encoding="utf-8") as f:
+                overrides = json.load(f)
+        except ValueError as ex:
+            # systemd restarts us forever on a non-zero exit, so the log line
+            # is the only thing standing between a typo here and a headless
+            # box that just will not come up. Name the file and the error.
+            raise SystemExit(f"{local_path} is not valid JSON: {ex}") from ex
+        config = _merge_config(config, overrides)
+        print(f"merged local overrides from {local_path.name}", flush=True)
+    return config
 
 
 # --- Browser-origin guards ---------------------------------------------------

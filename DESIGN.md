@@ -132,6 +132,14 @@ heartbeat = OK, solid red = pool unreachable.
 - **Config file** (`bridge/config.json`): adapter IP (or UDP auto-discover),
   HTTP port, friendly-name → circuit-ID map (discovered once via
   `screenlogicpy` CLI at setup), setpoint bounds, poll intervals.
+- **Machine state lives in `config.local.json`**, git-ignored, merged over the
+  tracked defaults one level deep at load. The installer used to write the
+  discovered adapter IP back into the tracked `config.json`, which left every
+  install permanently dirty — so the first repo-side change to that file
+  aborted `poollogic-update` mid-pull on a headless box. Shipped defaults and
+  per-machine discovery have different owners and must not share a file. The
+  installer and updater both migrate an already-dirty install automatically,
+  and the installer no longer rewrites anything when the value already matches.
 - **`--mock` flag:** serves a simulated pool — temps drift, commands succeed
   after a realistic delay, failure injection endpoints for testing FSM edges
   (drop bridge, drop pool link, command timeout). The entire PWA is built and

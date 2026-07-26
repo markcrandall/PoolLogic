@@ -28,6 +28,46 @@ ask() { local reply; read -rp "$1" reply </dev/tty; echo "$reply"; }
 
 [ "$(id -u)" -eq 0 ] || { echo "Run with sudo."; exit 1; }
 
+# Older installs wrote the discovered adapter IP into the tracked
+# bridge/config.json, leaving it permanently modified so any repo-side change
+# to that file aborts the pull. Lift the local value into config.local.json and
+# restore the tracked copy. No-op on a clean or fresh install.
+migrate_local_config() {
+  local dir="$1"
+  [ -d "$dir/.git" ] || return 0
+  sudo -u "$APP_USER" git -C "$dir" diff --quiet -- bridge/config.json 2>/dev/null && return 0
+  say "Moving machine-specific config out of the tracked config.json..."
+  python3 - "$dir/bridge" <<'PY'
+import json
+import os
+import sys
+
+d = sys.argv[1]
+
+
+def read(path):
+    try:
+        with open(path, encoding="utf-8") as f:
+            return json.load(f)
+    except (OSError, ValueError):
+        return {}
+
+
+current = read(os.path.join(d, "config.json"))     # the locally-modified copy
+local = read(os.path.join(d, "config.local.json"))
+ip = current.get("adapterIp")
+if ip and local.get("adapterIp") != ip:
+    local["adapterIp"] = ip
+    with open(os.path.join(d, "config.local.json"), "w", encoding="utf-8") as f:
+        json.dump(local, f, indent=2)
+        f.write("\n")
+    print(f"    kept adapterIp {ip} in config.local.json")
+else:
+    print("    no adapterIp to preserve (formatting-only change)")
+PY
+  sudo -u "$APP_USER" git -C "$dir" checkout -- bridge/config.json
+}
+
 say "Installing packages (git, python3-venv, curl)..."
 apt-get update -qq
 apt-get install -y -qq git python3-venv curl >/dev/null
@@ -41,6 +81,7 @@ if [ -n "$SCRIPT_DIR" ] && [ -f "$SCRIPT_DIR/../bridge/bridge.py" ]; then
   say "Using existing checkout at $INSTALL_DIR"
 elif [ -d "$INSTALL_DIR/.git" ]; then
   say "Updating existing install at $INSTALL_DIR..."
+  migrate_local_config "$INSTALL_DIR"
   sudo -u "$APP_USER" git -C "$INSTALL_DIR" pull --ff-only
 else
   say "Cloning PoolLogic to $INSTALL_DIR..."
@@ -77,26 +118,57 @@ PY
 )"
 
 if [ -n "$FOUND_IP" ]; then
-  say "Adapter found at $FOUND_IP — writing it into bridge/config.json"
-  "$PYTHON" - "$INSTALL_DIR/bridge/config.json" "$FOUND_IP" <<'PY'
+  # Written to config.local.json (git-ignored), never to the tracked
+  # config.json. Writing machine state into a tracked file left every install
+  # permanently dirty, so the first repo-side change to config.json aborted
+  # `poollogic-update` mid-pull on a headless box. Also a no-op when the
+  # effective value already matches — nothing is rewritten just to reformat it.
+  "$PYTHON" - "$INSTALL_DIR/bridge" "$FOUND_IP" <<'PY'
 import json
+import os
 import sys
 
-path, ip = sys.argv[1], sys.argv[2]
-with open(path, encoding="utf-8") as f:
-    cfg = json.load(f)
-cfg["adapterIp"] = ip
-with open(path, "w", encoding="utf-8") as f:
-    json.dump(cfg, f, indent=2)
+bridge_dir, ip = sys.argv[1], sys.argv[2]
+base_path = os.path.join(bridge_dir, "config.json")
+local_path = os.path.join(bridge_dir, "config.local.json")
+
+
+def read(path):
+    try:
+        with open(path, encoding="utf-8") as f:
+            return json.load(f)
+    except (OSError, ValueError):
+        return {}
+
+
+base, local = read(base_path), read(local_path)
+if {**base, **local}.get("adapterIp") == ip:
+    print(f"    Adapter found at {ip} — already configured, nothing to write.")
+    sys.exit()
+
+local["adapterIp"] = ip
+with open(local_path, "w", encoding="utf-8") as f:
+    json.dump(local, f, indent=2)
     f.write("\n")
+print(f"    Adapter found at {ip} — recorded in bridge/config.local.json")
 PY
 else
-  KEPT_IP="$(grep -o '"adapterIp": *"[^"]*"' "$INSTALL_DIR/bridge/config.json" || true)"
+  KEPT_IP="$("$PYTHON" -c "
+import json, os, sys
+d = sys.argv[1]
+def read(p):
+    try:
+        return json.load(open(p, encoding='utf-8'))
+    except Exception:
+        return {}
+cfg = {**read(os.path.join(d, 'config.json')), **read(os.path.join(d, 'config.local.json'))}
+print(cfg.get('adapterIp') or 'none')
+" "$INSTALL_DIR/bridge" 2>/dev/null || echo none)"
   say "No adapter answered discovery."
   echo "    Common causes: the official Pentair app is open on a phone (it"
   echo "    holds the adapter's limited connection slots), or the adapter is"
   echo "    hung (unplug it for 10 seconds). Keeping the configured value:"
-  echo "    ${KEPT_IP:-none}. Re-run this installer to retry discovery."
+  echo "    ${KEPT_IP}. Re-run this installer to retry discovery."
 fi
 
 # --- Optional static IP for the Pi ------------------------------------------

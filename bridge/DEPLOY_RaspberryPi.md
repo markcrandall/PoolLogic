@@ -227,6 +227,17 @@ setpoint bounds (40–102), `circuitIds` (this pool's ScreenLogic circuit
 numbers — also defines which circuits the API accepts), `statusLed`,
 `allowedHosts`.
 
+**Two files, on purpose.** `config.json` is tracked in git and holds what the
+repo ships. `config.local.json` sits beside it, is git-ignored, and holds
+whatever is specific to *this* Pi — the installer records the discovered
+`adapterIp` there. Anything in the local file wins, merged one level deep, so
+it can override a single circuit ID or just `statusLed.mode` without restating
+the block. Put machine-specific edits in the local file: values written into
+the tracked one leave it permanently modified, and the next repo change to
+`config.json` then aborts `poollogic-update` with "local changes would be
+overwritten". Both the installer and the updater migrate an already-dirty
+install automatically.
+
 `allowedHosts` lists the hostnames the bridge will answer to, on top of its own
 hostname, `localhost`, and any bare IP address — a DNS-rebinding guard (see
 DESIGN.md). `.local` / `.lan` / `.home` suffixes on a listed name are accepted
