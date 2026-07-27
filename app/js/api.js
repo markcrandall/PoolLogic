@@ -29,6 +29,24 @@ export async function fetchState() {
   }
 }
 
+// Fetched once at boot by the config view. Static for the life of the process
+// — the bridge only re-reads config.json on restart.
+export async function fetchConfig() {
+  const abort = new AbortController();
+  const timer = setTimeout(() => abort.abort(), FETCH_TIMEOUT_MS);
+  try {
+    const res = await fetch("api/config", {
+      cache: "no-store",
+      signal: abort.signal,
+    });
+    return res.ok ? await res.json() : null;
+  } catch {
+    return null;
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
 export async function postJson(url, body) {
   const abort = new AbortController();
   const timer = setTimeout(() => abort.abort(), COMMAND_FETCH_TIMEOUT_MS);

@@ -399,5 +399,12 @@ PoolLogic/
    confirmed working on the wifi, so adapter is present and reachable).
 5. **M5 — polish + deployment**: icons, styling pass, add-to-home-screen check
    on iOS/Android, runbook for moving the bridge to the turnkey box.
+6. **M6 — in service**: everything after the bridge went live on the Pi, driven
+   by review rather than plan. Freeze protection surfaced; reading age split
+   from poll age; browser-origin guards (Content-Type + Host); two connection
+   FSM liveness bugs closed with regression tests; clean shutdown; machine
+   config separated from shipped defaults so updates stop colliding; the
+   read-only circuit map at `/?config` for verifying `circuitIds` against the
+   panel from a phone at the equipment pad.
 
 Each milestone is independently demonstrable; M1–M3 require no pool access.

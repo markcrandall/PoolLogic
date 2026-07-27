@@ -235,6 +235,53 @@ span.pending::after { border-top-color: var(--blue); }
   text-transform: capitalize;
 }
 
+.config-view {
+  padding: 0.5rem 1rem 1rem;
+}
+.config-view h2 {
+  font-size: 1.05rem;
+  margin: 1rem 0 0.5rem;
+}
+
+.config-table {
+  width: 100%;
+  border-collapse: collapse;
+  background: var(--card);
+  border-radius: 8px;
+  overflow: hidden;
+}
+.config-table th,
+.config-table td {
+  padding: 0.55rem 0.7rem;
+  text-align: left;
+  border-bottom: 1px solid #e4ecf1;
+  font-size: 0.95rem;
+}
+.config-table th {
+  font-size: 0.75rem;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  color: var(--muted);
+}
+.config-table tr:last-child td { border-bottom: none; }
+.config-id { font-variant-numeric: tabular-nums; color: var(--muted); }
+.config-state { font-weight: 600; color: var(--muted); }
+.config-state.on { color: var(--green); }
+.config-note-cell { font-size: 0.75rem; color: var(--muted); text-align: right; }
+
+.config-note {
+  font-size: 0.85rem;
+  color: var(--muted);
+  line-height: 1.4;
+}
+.config-back {
+  display: inline-block;
+  margin-top: 0.5rem;
+  color: var(--blue);
+  font-size: 0.9rem;
+  text-decoration: none;
+}
+
 .toast {
   position: fixed;
   left: 50%;

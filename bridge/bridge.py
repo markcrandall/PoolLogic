@@ -74,6 +74,7 @@ class Api:
     def routes(self):
         return [
             web.get("/api/state", self.get_state),
+            web.get("/api/config", self.get_config),
             web.post("/api/circuit/{name}", self.set_circuit),
             web.post("/api/heat/{body}/on", self.heat_on),
             web.post("/api/heat/{body}/off", self.heat_off),
@@ -83,6 +84,24 @@ class Api:
 
     async def get_state(self, request):
         return web.json_response(await self.backend.get_state())
+
+    async def get_config(self, request):
+        """Read-only view of the config the client needs to render the circuit
+        map. A curated subset rather than the whole file, deliberately: this is
+        the shape a future editable version would POST back, and the file also
+        holds things the browser has no business reading (allowedHosts) or
+        changing casually (adapterIp). Widen it when there is a reason to.
+        """
+        return web.json_response(
+            {
+                "circuitIds": self.config["circuitIds"],
+                # Which of those the API will actually accept a command for;
+                # 'pool' is read-only (it drives temp staleness).
+                "settableCircuits": list(self.circuits),
+                "setpointMin": self.config["setpointMin"],
+                "setpointMax": self.config["setpointMax"],
+            }
+        )
 
     async def set_circuit(self, request):
         name = request.match_info["name"]

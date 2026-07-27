@@ -65,9 +65,22 @@
     </div>
   </main>
 
+  <!-- Shown instead of the controls at /?config -->
+  <section id="config-view" class="config-view hidden">
+    <h2>Circuit map</h2>
+    <table id="config-circuits" class="config-table">
+      <thead>
+        <tr><th>Name</th><th>ID</th><th>State</th><th></th></tr>
+      </thead>
+      <tbody></tbody>
+    </table>
+    <p id="config-note" class="config-note"></p>
+    <a class="config-back" href="./">← back to controls</a>
+  </section>
+
   <div id="toast" class="toast">Command failed — the pool didn't respond</div>
 
-  <div class="app-version">M5</div>
+  <div class="app-version">M6</div>
   <script type="module" src="js/app.js"></script>
 </body>
 </html>

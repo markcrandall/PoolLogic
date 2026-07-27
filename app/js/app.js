@@ -5,7 +5,14 @@
 import { store } from "./state.js";
 import { fetchState } from "./api.js";
 import { ConnState, ConnEvent, BACKOFF_SECONDS } from "./fsm/connection.js";
-import { render, bindHandlers } from "./views/panel.js";
+import * as panelView from "./views/panel.js";
+import * as configView from "./views/config.js";
+
+// /?config swaps in the read-only circuit map. Same store, same poll loop —
+// only the output logic differs, so connection handling stays in one place.
+const { render, bindHandlers } = new URLSearchParams(location.search).has("config")
+  ? configView
+  : panelView;
 
 const POLL_INTERVAL_MS = 5000;
 // Comfortably past the 4s fetch timeout, so a normal reconnect poll always
