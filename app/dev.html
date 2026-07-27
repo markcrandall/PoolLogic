@@ -21,6 +21,8 @@
   <button onclick="post('/api/mock/command_timeout', {enabled: false})">Unstall commands</button>
   <button onclick="post('/api/mock/freeze', {on: true})">Freeze protection ON</button>
   <button onclick="post('/api/mock/freeze', {on: false})">Freeze protection OFF</button>
+  <button onclick="post('/api/mock/alarm', {on: true})">Raise flow alarm</button>
+  <button onclick="post('/api/mock/alarm', {on: false})">Clear flow alarm</button>
   <script>
     async function post(url, body) {
       const res = await fetch(url, {

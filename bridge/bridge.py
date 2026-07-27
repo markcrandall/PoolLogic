@@ -75,7 +75,7 @@ class Api:
         return [
             web.get("/api/state", self.get_state),
             web.get("/api/config", self.get_config),
-            web.get("/api/circuits", self.get_panel_circuits),
+            web.get("/api/panel", self.get_panel_info),
             web.post("/api/circuit/{name}", self.set_circuit),
             web.post("/api/heat/{body}/on", self.heat_on),
             web.post("/api/heat/{body}/off", self.heat_off),
@@ -104,13 +104,12 @@ class Api:
             }
         )
 
-    async def get_panel_circuits(self, request):
-        """Everything the panel reports, not just what config.json names. Kept
-        off /api/state on purpose: only the config page wants it, and every
-        phone polls state every 5s."""
-        return web.json_response(
-            {"circuits": await self.backend.get_panel_circuits()}
-        )
+    async def get_panel_info(self, request):
+        """Everything the panel reports about itself: circuits (not just the
+        ones config.json names), pump telemetry, alerts and equipment. Kept off
+        /api/state on purpose — only the config page wants it, and every phone
+        polls state every 5s."""
+        return web.json_response(await self.backend.get_panel_info())
 
     async def set_circuit(self, request):
         name = request.match_info["name"]
@@ -196,6 +195,7 @@ class MockControls:
             web.post("/api/mock/pool_link", self.pool_link),
             web.post("/api/mock/command_timeout", self.command_timeout),
             web.post("/api/mock/freeze", self.freeze),
+            web.post("/api/mock/alarm", self.alarm),
         ]
 
     async def pool_link(self, request):
@@ -218,6 +218,13 @@ class MockControls:
             return bad_request('expected {"on": true|false}')
         self.backend.freeze_mode = body["on"]
         return web.json_response({"freezeMode": self.backend.freeze_mode})
+
+    async def alarm(self, request):
+        body = await read_json(request)
+        if body is None or not isinstance(body.get("on"), bool):
+            return bad_request('expected {"on": true|false}')
+        self.backend.alarm_injected = body["on"]
+        return web.json_response({"alarm": self.backend.alarm_injected})
 
 
 async def serve_app_file(request):

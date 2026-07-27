@@ -47,18 +47,18 @@ export async function fetchConfig() {
   }
 }
 
-// Every circuit the panel reports, with its panel-assigned name. Only the
-// config view asks for this, which is why it is not folded into /api/state.
-export async function fetchPanelCircuits() {
+// What the panel reports about itself: circuits, pumps, alerts, equipment.
+// Only the config view asks for this, which is why it is not folded into
+// /api/state — every phone polls that every 5s.
+export async function fetchPanelInfo() {
   const abort = new AbortController();
   const timer = setTimeout(() => abort.abort(), FETCH_TIMEOUT_MS);
   try {
-    const res = await fetch("api/circuits", {
+    const res = await fetch("api/panel", {
       cache: "no-store",
       signal: abort.signal,
     });
-    if (!res.ok) return null;
-    return (await res.json()).circuits ?? null;
+    return res.ok ? await res.json() : null;
   } catch {
     return null;
   } finally {

@@ -275,6 +275,19 @@ span.pending::after { border-top-color: var(--blue); }
   color: var(--muted);
   line-height: 1.4;
 }
+
+.config-dl {
+  display: grid;
+  grid-template-columns: max-content 1fr;
+  gap: 0.35rem 1rem;
+  margin: 0;
+  padding: 0.7rem;
+  background: var(--card);
+  border-radius: 8px;
+  font-size: 0.9rem;
+}
+.config-dl dt { color: var(--muted); }
+.config-dl dd { margin: 0; overflow-wrap: anywhere; }
 .config-back {
   display: inline-block;
   margin-top: 0.5rem;

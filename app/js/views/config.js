@@ -12,11 +12,11 @@
 // state passed in, and nothing here mutates state or sends commands.
 
 import { ConnState } from "../fsm/connection.js";
-import { fetchConfig, fetchPanelCircuits } from "../api.js";
+import { fetchConfig, fetchPanelInfo } from "../api.js";
 import { store } from "../state.js";
 
 let config = null;
-let panelCircuits = null;
+let panel = null;
 
 export function bindHandlers() {
   // Swap the pool controls out for the config view. Both live in index.html so
@@ -38,9 +38,9 @@ export function bindHandlers() {
 
 // Called by the scheduler after each poll, so this view never owns a timer.
 export function afterPoll() {
-  fetchPanelCircuits().then((loaded) => {
-    if (loaded === null) return; // keep the last good list rather than blanking
-    panelCircuits = loaded;
+  fetchPanelInfo().then((loaded) => {
+    if (loaded === null) return; // keep the last good data rather than blanking
+    panel = loaded;
     render(store.getState());
   });
 }
@@ -87,6 +87,9 @@ export function render(state) {
     : "Not connected — states below are not current.";
 
   renderPanelCircuits(live);
+  renderPumps(live);
+  renderAlerts(live);
+  renderEquipment();
 }
 
 // The panel's own list: every circuit it reports, under the name it gives it.
@@ -95,6 +98,7 @@ export function render(state) {
 function renderPanelCircuits(live) {
   const tbody = document.querySelector("#panel-circuits tbody");
   const note = document.getElementById("panel-note");
+  const panelCircuits = panel?.circuits ?? null;
 
   if (panelCircuits === null) {
     note.textContent = "Reading the panel…";
@@ -135,6 +139,104 @@ function renderPanelCircuits(live) {
   note.textContent = unmapped
     ? `${panelCircuits.length} circuits reported; ${unmapped} not in config.json.`
     : `${panelCircuits.length} circuits reported, all mapped.`;
+}
+
+// Live pump telemetry. Only populated slots come back — a panel reports eight
+// regardless of how many pumps exist.
+function renderPumps(live) {
+  const tbody = document.querySelector("#panel-pumps tbody");
+  const note = document.getElementById("pumps-note");
+  const pumps = panel?.pumps ?? null;
+
+  if (pumps === null) return;
+  if (pumps.length === 0) {
+    tbody.replaceChildren();
+    note.textContent = "No pump telemetry reported.";
+    return;
+  }
+  note.textContent = "";
+
+  const num = (v, unit) => (!live || v == null ? "—" : `${v} ${unit}`);
+  tbody.replaceChildren(
+    ...pumps.map((p) =>
+      cells([
+        ["config-id", `Pump ${p.id}`],
+        ["config-state", !live ? "—" : p.running ? "Running" : "Idle", live && p.running],
+        ["config-name", num(p.watts, "W")],
+        ["config-name", num(p.rpm, "rpm")],
+        ["config-note-cell", num(p.gpm, "gpm")],
+      ])
+    )
+  );
+}
+
+// Anything the panel is complaining about. Zero rows is the normal case, so
+// the section says so plainly rather than sitting empty.
+function renderAlerts(live) {
+  const tbody = document.querySelector("#panel-alerts tbody");
+  const note = document.getElementById("alerts-note");
+  const alerts = panel?.alerts ?? null;
+
+  if (alerts === null) return;
+  tbody.replaceChildren(
+    ...alerts.map((a) =>
+      cells([
+        ["config-name", a.label],
+        ["config-state", !live ? "—" : String(a.value), false],
+        ["config-note-cell", a.ok ? "ok" : "ATTENTION", !a.ok],
+      ])
+    )
+  );
+  const bad = alerts.filter((a) => !a.ok).length;
+  note.textContent = !live
+    ? "Not connected — alert states are not current."
+    : bad
+      ? `${bad} item${bad === 1 ? "" : "s"} needing attention.`
+      : "Nothing reported.";
+}
+
+function renderEquipment() {
+  const dl = document.getElementById("panel-equipment");
+  const e = panel?.equipment ?? null;
+  if (e === null) return;
+
+  const rows = [
+    ["Model", e.model ?? "—"],
+    ["Firmware", e.firmware ?? "—"],
+    ["Installed", (e.installed ?? []).join(", ") || "—"],
+    ["Circuits", e.circuitCount ?? "—"],
+    ["Colors", e.colorCount ?? "—"],
+    ["Setpoint range", e.minSetpoint != null ? `${e.minSetpoint}–${e.maxSetpoint}°` : "—"],
+  ];
+  dl.replaceChildren(
+    ...rows.flatMap(([label, value]) => {
+      const dt = document.createElement("dt");
+      dt.textContent = label;
+      const dd = document.createElement("dd");
+      dd.textContent = String(value);
+      return [dt, dd];
+    })
+  );
+
+  // The panel's own bounds are authoritative; config.json duplicates them.
+  const configured = config?.setpointMax;
+  const note = document.getElementById("equipment-note");
+  note.textContent =
+    configured != null && e.maxSetpoint != null && configured !== e.maxSetpoint
+      ? `config.json caps the setpoint at ${configured}°, but the panel allows ${e.maxSetpoint}°.`
+      : "";
+}
+
+function cells(spec) {
+  const tr = document.createElement("tr");
+  for (const [cls, text, flag] of spec) {
+    const td = document.createElement("td");
+    td.className = cls;
+    td.textContent = text;
+    if (flag) td.classList.add(cls === "config-note-cell" ? "unmapped" : "on");
+    tr.appendChild(td);
+  }
+  return tr;
 }
 
 function row(name) {

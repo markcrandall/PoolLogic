@@ -50,6 +50,7 @@ class MockBackend:
         # when it engages; the mock just reports the flag so the client's
         # freeze handling can be exercised out of season.
         self.freeze_mode = False
+        self.alarm_injected = False
 
         self._last_contact = _now()
         self._last_contact_mono = time.monotonic()
@@ -69,6 +70,7 @@ class MockBackend:
         }
         self._light_show = None
         self._drift_task = None
+        self._pump_watts = 1450.0
 
     @property
     def pool_up(self):
@@ -94,6 +96,7 @@ class MockBackend:
             self._last_contact = _now()
             self._last_contact_mono = time.monotonic()
 
+            self._pump_watts = _walk(self._pump_watts, 25, 1350, 1550)
             self._temps["air"] = _walk(self._temps["air"], 0.3, 75, 95)
             self._temps["pool"] = _walk(self._temps["pool"], 0.1, 80, 88)
 
@@ -138,16 +141,16 @@ class MockBackend:
             "lightShow": self._light_show,
         }
 
-    async def get_panel_circuits(self):
-        """Panel-reported circuits, deliberately a superset of config.json.
+    async def get_panel_info(self):
+        """What a panel might report about itself.
 
-        The extras (Aux 4, Waterfall) have no entry in circuitIds, which is the
-        interesting case for the config page: after a controller swap the panel
-        may report circuits we have no name for, or report our IDs under
-        different names. A mock that only echoed our own map would never show
-        that."""
+        The circuit list is deliberately a superset of config.json — the extras
+        (Aux 4, Waterfall) have no entry in circuitIds, which is the case the
+        config page has to make visible. A mock echoing only our own map would
+        never exercise it.
+        """
         by_id = {cid: name for name, cid in self._circuit_ids.items()}
-        return [
+        circuits = [
             {
                 "id": cid,
                 "name": label,
@@ -155,6 +158,45 @@ class MockBackend:
             }
             for cid, label in sorted(PANEL_CIRCUIT_NAMES.items())
         ]
+
+        # Pump telemetry tracks whether anything is actually circulating, so
+        # the numbers move when you toggle circuits instead of sitting still.
+        running = any(
+            self._circuits.get(name) for name in ("pool", "spa", "jets", "cleaner")
+        )
+        pumps = [
+            {
+                "id": 0,
+                "type": 1,
+                "running": running,
+                "watts": round(self._pump_watts) if running else 0,
+                "rpm": 3000 if running else 0,
+                "gpm": 68 if running else 0,
+            }
+        ]
+
+        alerts = [
+            {"label": "Active alert", "value": 0, "ok": True},
+            {"label": "Chlorinator", "value": 0, "ok": True},
+            {"label": "Salt", "value": "3400 ppm", "ok": True},
+        ]
+        if self.alarm_injected:
+            alerts.insert(1, {"label": "Flow", "value": 1, "ok": False})
+
+        return {
+            "circuits": circuits,
+            "pumps": pumps,
+            "alerts": alerts,
+            "equipment": {
+                "model": "MockTouch 8",
+                "firmware": "MOCK 0.0 Build 0.0",
+                "installed": ["CHLORINATOR", "INTELLIBRITE", "INTELLIFLO_0"],
+                "circuitCount": len(PANEL_CIRCUIT_NAMES),
+                "colorCount": 8,
+                "minSetpoint": self.setpoint_min,
+                "maxSetpoint": self.setpoint_max,
+            },
+        }
 
     # -- Commands ---------------------------------------------------------
 

@@ -34,6 +34,108 @@ def _now():
     return datetime.now().isoformat(timespec="seconds")
 
 
+# --- Panel introspection ------------------------------------------------------
+# screenlogicpy wraps most readings as {"name": ..., "value": ..., "unit": ...}
+# but not all of them, so unwrap defensively rather than assuming.
+
+def _val(node, default=None):
+    if isinstance(node, dict):
+        return node.get("value", default)
+    return node if node is not None else default
+
+
+def _unit(node):
+    return node.get("unit") if isinstance(node, dict) else None
+
+
+def _panel_circuits(d):
+    circuits = [
+        {"id": cid, "name": c.get("name"), "on": bool(_val(c.get("value")))}
+        for cid, c in (d.get("circuit") or {}).items()
+        if isinstance(c, dict)
+    ]
+    circuits.sort(key=lambda c: (c["id"] is None, c["id"]))
+    return circuits
+
+
+def _pumps(d):
+    """Only populated slots. A panel reports eight regardless of how many
+    pumps exist; the empty ones carry nothing but a raw data blob."""
+    pumps = []
+    for pid, p in sorted((d.get("pump") or {}).items(), key=lambda kv: str(kv[0])):
+        if not isinstance(p, dict) or "watts_now" not in p:
+            continue
+        pumps.append(
+            {
+                "id": pid,
+                "type": _val(p.get("type")),
+                "running": bool(_val(p.get("state"))),
+                "watts": _val(p.get("watts_now")),
+                "rpm": _val(p.get("rpm_now")),
+                "gpm": _val(p.get("gpm_now")),
+            }
+        )
+    return pumps
+
+
+# Flags worth surfacing. IntelliChem's are included only when non-zero: on a
+# system without one they are a permanent row of zeroes that trains you to
+# ignore the whole section.
+_ALARM_LABELS = (
+    ("flow_alarm", "Flow"),
+    ("ph_high_alarm", "pH high"),
+    ("ph_low_alarm", "pH low"),
+    ("orp_high_alarm", "ORP high"),
+    ("orp_low_alarm", "ORP low"),
+    ("ph_supply_alarm", "pH supply"),
+    ("orp_supply_alarm", "ORP supply"),
+    ("probe_fault_alarm", "Probe fault"),
+)
+
+
+def _alerts(d):
+    sensor = d.get("controller", {}).get("sensor", {})
+    items = [
+        {
+            "label": "Active alert",
+            "value": _val(sensor.get("active_alert"), 0),
+            "ok": not _val(sensor.get("active_alert"), 0),
+        }
+    ]
+
+    scg = d.get("scg") or {}
+    if scg.get("scg_present"):
+        state = _val((scg.get("sensor") or {}).get("state"), 0)
+        salt = _val((scg.get("sensor") or {}).get("salt_ppm"))
+        items.append({"label": "Chlorinator", "value": state, "ok": not state})
+        if salt is not None:
+            items.append({"label": "Salt", "value": f"{salt} ppm", "ok": True})
+
+    alarms = (d.get("intellichem") or {}).get("alarm") or {}
+    for key, label in _ALARM_LABELS:
+        raw = _val(alarms.get(key), 0)
+        if raw:
+            items.append({"label": label, "value": raw, "ok": False})
+    return items
+
+
+def _equipment(d):
+    controller = d.get("controller") or {}
+    config = controller.get("configuration") or {}
+    equipment = controller.get("equipment") or {}
+    return {
+        "model": _val(controller.get("model")),
+        "firmware": _val((d.get("adapter") or {}).get("firmware")),
+        "installed": equipment.get("list") or [],
+        "circuitCount": _val(config.get("circuit_count")),
+        "colorCount": _val(config.get("color_count")),
+        # The panel's own setpoint bounds. config.json duplicates these; if the
+        # two ever disagree the panel is right.
+        "minSetpoint": _val((config.get("body_type") or {}).get(0, {}).get("min_setpoint")),
+        "maxSetpoint": _val((config.get("body_type") or {}).get(0, {}).get("max_setpoint")),
+    }
+
+
 class RealBackend:
     def __init__(self, config):
         self.ip = config["adapterIp"]
@@ -161,27 +263,22 @@ class RealBackend:
             return None  # never reached the adapter since boot
         return int(time.monotonic() - self._last_contact_mono)
 
-    async def get_panel_circuits(self):
-        """Every circuit the panel reports, with the name the panel gives it.
+    async def get_panel_info(self):
+        """Everything the panel reports about itself, for the config page.
 
-        config.json's circuitIds is our map; this is the panel's. After a
-        controller replacement the two can disagree silently — the bridge
-        faithfully reports whatever circuit it asked about — so being able to
-        read the panel's own names and IDs is what makes the map fixable.
+        config.json's circuitIds is our map; this is the panel's own account of
+        what exists. After a controller replacement the two can disagree
+        silently — the bridge faithfully reports whatever circuit it asked
+        about — so reading the panel's names, equipment and telemetry is what
+        makes the map fixable and the hardware legible.
         """
-        circuits = []
-        for cid, circuit in (self.gateway.get_data().get("circuit") or {}).items():
-            if not isinstance(circuit, dict):
-                continue
-            circuits.append(
-                {
-                    "id": cid,
-                    "name": circuit.get("name"),
-                    "on": bool(circuit.get("value")),
-                }
-            )
-        circuits.sort(key=lambda c: (c["id"] is None, c["id"]))
-        return circuits
+        d = self.gateway.get_data()
+        return {
+            "circuits": _panel_circuits(d),
+            "pumps": _pumps(d),
+            "alerts": _alerts(d),
+            "equipment": _equipment(d),
+        }
 
     # -- Commands ---------------------------------------------------------
 
