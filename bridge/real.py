@@ -161,6 +161,28 @@ class RealBackend:
             return None  # never reached the adapter since boot
         return int(time.monotonic() - self._last_contact_mono)
 
+    async def get_panel_circuits(self):
+        """Every circuit the panel reports, with the name the panel gives it.
+
+        config.json's circuitIds is our map; this is the panel's. After a
+        controller replacement the two can disagree silently — the bridge
+        faithfully reports whatever circuit it asked about — so being able to
+        read the panel's own names and IDs is what makes the map fixable.
+        """
+        circuits = []
+        for cid, circuit in (self.gateway.get_data().get("circuit") or {}).items():
+            if not isinstance(circuit, dict):
+                continue
+            circuits.append(
+                {
+                    "id": cid,
+                    "name": circuit.get("name"),
+                    "on": bool(circuit.get("value")),
+                }
+            )
+        circuits.sort(key=lambda c: (c["id"] is None, c["id"]))
+        return circuits
+
     # -- Commands ---------------------------------------------------------
 
     async def set_circuit(self, name, on):

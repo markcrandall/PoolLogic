@@ -47,6 +47,25 @@ export async function fetchConfig() {
   }
 }
 
+// Every circuit the panel reports, with its panel-assigned name. Only the
+// config view asks for this, which is why it is not folded into /api/state.
+export async function fetchPanelCircuits() {
+  const abort = new AbortController();
+  const timer = setTimeout(() => abort.abort(), FETCH_TIMEOUT_MS);
+  try {
+    const res = await fetch("api/circuits", {
+      cache: "no-store",
+      signal: abort.signal,
+    });
+    if (!res.ok) return null;
+    return (await res.json()).circuits ?? null;
+  } catch {
+    return null;
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
 export async function postJson(url, body) {
   const abort = new AbortController();
   const timer = setTimeout(() => abort.abort(), COMMAND_FETCH_TIMEOUT_MS);

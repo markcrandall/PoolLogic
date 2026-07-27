@@ -75,6 +75,7 @@ class Api:
         return [
             web.get("/api/state", self.get_state),
             web.get("/api/config", self.get_config),
+            web.get("/api/circuits", self.get_panel_circuits),
             web.post("/api/circuit/{name}", self.set_circuit),
             web.post("/api/heat/{body}/on", self.heat_on),
             web.post("/api/heat/{body}/off", self.heat_off),
@@ -101,6 +102,14 @@ class Api:
                 "setpointMin": self.config["setpointMin"],
                 "setpointMax": self.config["setpointMax"],
             }
+        )
+
+    async def get_panel_circuits(self, request):
+        """Everything the panel reports, not just what config.json names. Kept
+        off /api/state on purpose: only the config page wants it, and every
+        phone polls state every 5s."""
+        return web.json_response(
+            {"circuits": await self.backend.get_panel_circuits()}
         )
 
     async def set_circuit(self, request):

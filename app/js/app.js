@@ -10,9 +10,10 @@ import * as configView from "./views/config.js";
 
 // /?config swaps in the read-only circuit map. Same store, same poll loop —
 // only the output logic differs, so connection handling stays in one place.
-const { render, bindHandlers } = new URLSearchParams(location.search).has("config")
+const view = new URLSearchParams(location.search).has("config")
   ? configView
   : panelView;
+const { render, bindHandlers } = view;
 
 const POLL_INTERVAL_MS = 5000;
 // Comfortably past the 4s fetch timeout, so a normal reconnect poll always
@@ -44,6 +45,10 @@ async function poll() {
   if (generation !== pollGeneration) return; // superseded by the watchdog
   pollInFlight = false;
   store.dispatchConn(event, data);
+  // A view may need data outside /api/state. It piggybacks on the poll cadence
+  // rather than running its own timer, so the scheduler stays the only thing
+  // that decides when the network gets touched.
+  view.afterPoll?.();
 }
 
 function schedule() {

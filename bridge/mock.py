@@ -18,6 +18,20 @@ from errors import BackendUnavailable
 APPLY_DELAY = 1.5    # seconds between command ack and visible state change
 DRIFT_PERIOD = 2.0   # seconds between temperature updates
 
+# What a panel might report back, using this pool's IDs plus two circuits that
+# config.json has no entry for — the case the config page has to make visible.
+PANEL_CIRCUIT_NAMES = {
+    500: "Spa",
+    501: "Spa Jets",
+    502: "Pool Light",
+    503: "Spa Light",
+    504: "Aux 4",
+    505: "Pool",
+    508: "Waterfall",
+    510: "Cleaner",
+    511: "Spillway",
+}
+
 
 def _now():
     return datetime.now().isoformat(timespec="seconds")
@@ -27,6 +41,7 @@ class MockBackend:
     def __init__(self, config):
         self.setpoint_min = config["setpointMin"]
         self.setpoint_max = config["setpointMax"]
+        self._circuit_ids = config["circuitIds"]
 
         # Failure injection switches (driven by /api/mock/* routes)
         self.pool_link_up = True
@@ -122,6 +137,24 @@ class MockBackend:
             "heat": heat,
             "lightShow": self._light_show,
         }
+
+    async def get_panel_circuits(self):
+        """Panel-reported circuits, deliberately a superset of config.json.
+
+        The extras (Aux 4, Waterfall) have no entry in circuitIds, which is the
+        interesting case for the config page: after a controller swap the panel
+        may report circuits we have no name for, or report our IDs under
+        different names. A mock that only echoed our own map would never show
+        that."""
+        by_id = {cid: name for name, cid in self._circuit_ids.items()}
+        return [
+            {
+                "id": cid,
+                "name": label,
+                "on": bool(self._circuits.get(by_id.get(cid), False)),
+            }
+            for cid, label in sorted(PANEL_CIRCUIT_NAMES.items())
+        ]
 
     # -- Commands ---------------------------------------------------------
 

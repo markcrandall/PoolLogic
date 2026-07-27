@@ -12,10 +12,11 @@
 // state passed in, and nothing here mutates state or sends commands.
 
 import { ConnState } from "../fsm/connection.js";
-import { fetchConfig } from "../api.js";
+import { fetchConfig, fetchPanelCircuits } from "../api.js";
 import { store } from "../state.js";
 
 let config = null;
+let panelCircuits = null;
 
 export function bindHandlers() {
   // Swap the pool controls out for the config view. Both live in index.html so
@@ -30,6 +31,16 @@ export function bindHandlers() {
   // transition and will not notify subscribers on its own.
   fetchConfig().then((loaded) => {
     config = loaded;
+    render(store.getState());
+  });
+  afterPoll();
+}
+
+// Called by the scheduler after each poll, so this view never owns a timer.
+export function afterPoll() {
+  fetchPanelCircuits().then((loaded) => {
+    if (loaded === null) return; // keep the last good list rather than blanking
+    panelCircuits = loaded;
     render(store.getState());
   });
 }
@@ -74,6 +85,56 @@ export function render(state) {
   note.textContent = live
     ? "Switch each circuit from the panel and watch which row changes — that is the ID it is really bound to."
     : "Not connected — states below are not current.";
+
+  renderPanelCircuits(live);
+}
+
+// The panel's own list: every circuit it reports, under the name it gives it.
+// Rows the config map does not claim are flagged, because after a controller
+// swap those are exactly where the missing equipment went.
+function renderPanelCircuits(live) {
+  const tbody = document.querySelector("#panel-circuits tbody");
+  const note = document.getElementById("panel-note");
+
+  if (panelCircuits === null) {
+    note.textContent = "Reading the panel…";
+    return;
+  }
+  if (panelCircuits.length === 0) {
+    note.textContent = "The panel reported no circuits.";
+    tbody.replaceChildren();
+    return;
+  }
+
+  const mapped = new Map(
+    Object.entries(config?.circuitIds ?? {}).map(([name, id]) => [id, name])
+  );
+
+  tbody.replaceChildren(
+    ...panelCircuits.map((circuit) => {
+      const tr = document.createElement("tr");
+      const ours = mapped.get(circuit.id);
+      for (const [cls, text] of [
+        ["config-id", String(circuit.id)],
+        ["config-name", circuit.name ?? "(unnamed)"],
+        ["config-state", !live ? "—" : circuit.on ? "On" : "Off"],
+        ["config-note-cell", ours ? `= ${ours}` : "not in config"],
+      ]) {
+        const td = document.createElement("td");
+        td.className = cls;
+        td.textContent = text;
+        if (cls === "config-state") td.classList.toggle("on", live && circuit.on);
+        if (cls === "config-note-cell" && !ours) td.classList.add("unmapped");
+        tr.appendChild(td);
+      }
+      return tr;
+    })
+  );
+
+  const unmapped = panelCircuits.filter((c) => !mapped.has(c.id)).length;
+  note.textContent = unmapped
+    ? `${panelCircuits.length} circuits reported; ${unmapped} not in config.json.`
+    : `${panelCircuits.length} circuits reported, all mapped.`;
 }
 
 function row(name) {
