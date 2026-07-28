@@ -265,10 +265,12 @@ span.pending::after { border-top-color: var(--blue); }
 }
 .config-table tr:last-child td { border-bottom: none; }
 .config-id { font-variant-numeric: tabular-nums; color: var(--muted); }
+/* Telemetry read as body text, digits locked to one width so a column scans. */
+.config-value { font-variant-numeric: tabular-nums; }
 .config-state { font-weight: 600; color: var(--muted); }
 .config-state.on { color: var(--green); }
 .config-note-cell { font-size: 0.75rem; color: var(--muted); text-align: right; }
-.config-note-cell.unmapped { color: var(--amber); font-weight: 600; }
+.config-note-cell.attention { color: var(--amber); font-weight: 600; }
 
 .config-note {
   font-size: 0.85rem;

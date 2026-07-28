@@ -116,22 +116,13 @@ function renderPanelCircuits(live) {
 
   tbody.replaceChildren(
     ...panelCircuits.map((circuit) => {
-      const tr = document.createElement("tr");
       const ours = mapped.get(circuit.id);
-      for (const [cls, text] of [
+      return cells([
         ["config-id", String(circuit.id)],
         ["config-name", circuit.name ?? "(unnamed)"],
-        ["config-state", !live ? "—" : circuit.on ? "On" : "Off"],
-        ["config-note-cell", ours ? `= ${ours}` : "not in config"],
-      ]) {
-        const td = document.createElement("td");
-        td.className = cls;
-        td.textContent = text;
-        if (cls === "config-state") td.classList.toggle("on", live && circuit.on);
-        if (cls === "config-note-cell" && !ours) td.classList.add("unmapped");
-        tr.appendChild(td);
-      }
-      return tr;
+        ["config-state", !live ? "—" : circuit.on ? "On" : "Off", live && circuit.on],
+        ["config-note-cell", ours ? `= ${ours}` : "not in config", !ours],
+      ]);
     })
   );
 
@@ -160,11 +151,11 @@ function renderPumps(live) {
   tbody.replaceChildren(
     ...pumps.map((p) =>
       cells([
-        ["config-id", `Pump ${p.id}`],
+        ["config-name", `Pump ${p.id}`],
         ["config-state", !live ? "—" : p.running ? "Running" : "Idle", live && p.running],
-        ["config-name", num(p.watts, "W")],
-        ["config-name", num(p.rpm, "rpm")],
-        ["config-note-cell", num(p.gpm, "gpm")],
+        ["config-value", num(p.watts, "W")],
+        ["config-value", num(p.rpm, "rpm")],
+        ["config-value", num(p.gpm, "gpm")],
       ])
     )
   );
@@ -233,7 +224,7 @@ function cells(spec) {
     const td = document.createElement("td");
     td.className = cls;
     td.textContent = text;
-    if (flag) td.classList.add(cls === "config-note-cell" ? "unmapped" : "on");
+    if (flag) td.classList.add(cls === "config-note-cell" ? "attention" : "on");
     tr.appendChild(td);
   }
   return tr;
@@ -242,7 +233,9 @@ function cells(spec) {
 function row(name) {
   const tr = document.createElement("tr");
   tr.dataset.circuit = name;
-  for (const cls of ["config-name", "config-id", "config-state", "config-note-cell"]) {
+  // ID first, matching the panel's own table, so the two ID columns line up
+  // and cross-reading them is a single vertical scan.
+  for (const cls of ["config-id", "config-name", "config-state", "config-note-cell"]) {
     const td = document.createElement("td");
     td.className = cls;
     if (cls === "config-name") td.textContent = name;
