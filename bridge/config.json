@@ -10,9 +10,9 @@
     "pool": 505,
     "spa": 500,
     "jets": 501,
-    "cleaner": 510,
-    "spillway": 511,
+    "cleaner": 507,
+    "spillway": 506,
     "poolLight": 502,
-    "spaLight": 503
+    "spaLight": 504
   }
 }
