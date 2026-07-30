@@ -88,6 +88,7 @@ export function render(state) {
 
   renderPanelCircuits(live);
   renderPumps(live);
+  renderStatus(live);
   renderAlerts(live);
   renderEquipment();
 }
@@ -161,8 +162,32 @@ function renderPumps(live) {
   );
 }
 
-// Anything the panel is complaining about. Zero rows is the normal case, so
-// the section says so plainly rather than sitting empty.
+// Readings, not verdicts. Nothing here can be "wrong", so no row carries an
+// ok/attention flag — a producing chlorinator is just a producing chlorinator.
+function renderStatus(live) {
+  const tbody = document.querySelector("#panel-status tbody");
+  const note = document.getElementById("status-note");
+  const status = panel?.status ?? null;
+
+  if (status === null) return;
+  if (status.length === 0) {
+    tbody.replaceChildren();
+    note.textContent = "No chlorinator reported.";
+    return;
+  }
+  tbody.replaceChildren(
+    ...status.map((s) =>
+      cells([
+        ["config-name", s.label],
+        ["config-value", !live ? "—" : String(s.value)],
+      ])
+    )
+  );
+  note.textContent = live ? "" : "Not connected — readings are not current.";
+}
+
+// Faults only. Every row here is something wrong, so every row is flagged; an
+// empty table is the healthy case and says so rather than sitting blank.
 function renderAlerts(live) {
   const tbody = document.querySelector("#panel-alerts tbody");
   const note = document.getElementById("alerts-note");
@@ -173,16 +198,14 @@ function renderAlerts(live) {
     ...alerts.map((a) =>
       cells([
         ["config-name", a.label],
-        ["config-state", !live ? "—" : String(a.value), false],
-        ["config-note-cell", a.ok ? "ok" : "ATTENTION", !a.ok],
+        ["config-note-cell", !live ? "—" : String(a.value), live],
       ])
     )
   );
-  const bad = alerts.filter((a) => !a.ok).length;
   note.textContent = !live
     ? "Not connected — alert states are not current."
-    : bad
-      ? `${bad} item${bad === 1 ? "" : "s"} needing attention.`
+    : alerts.length
+      ? `${alerts.length} item${alerts.length === 1 ? "" : "s"} needing attention.`
       : "Nothing reported.";
 }
 

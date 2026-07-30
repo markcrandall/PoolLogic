@@ -171,9 +171,27 @@ POST /api/lights                {"show": "white" | "caribbean" | "party"}
 `{name}` ∈ spa, jets, cleaner, spillway, poolLight, spaLight.
 `{body}` ∈ pool, spa. Unknown names → 404. Out-of-bounds temp → 400.
 
-Mock-only: `POST /api/mock/freeze {"on": bool}` alongside the existing
-`pool_link` and `command_timeout` injectors, so freeze handling is testable
-out of season.
+Mock-only: `POST /api/mock/freeze {"on": bool}` and
+`POST /api/mock/alarm {"on": bool}` alongside the existing `pool_link` and
+`command_timeout` injectors, so freeze handling and the alert path are testable
+without waiting on weather or a fault.
+
+`GET /api/config` and `GET /api/panel` serve the config page only (kept off
+`/api/state`, which every phone polls every 5s). `/api/panel` returns
+`{circuits, pumps, status, alerts, equipment}`.
+
+**`status` and `alerts` are separate on purpose.** `status` holds readings and
+carries no verdict; `alerts` holds fault conditions only and is empty when
+healthy. Mixing them is what made the page claim a fault the manufacturer's own
+app did not show: screenlogicpy reports SCG state as
+`ON_OFF.from_bool(state & 0x01)` — "the chlorinator is producing" — and a
+verdict applied to every row turned a healthy chlorinator into a permanent
+alarm. A reading is not a judgement.
+
+Pump `gpm` is suppressed when it reads `0xFF`, the panel's no-data sentinel.
+This pool reported 255 gpm on both the original controller and its replacement,
+which ruled out hardware and identified it as a missing value being rendered as
+a measurement.
 
 `poolDelay` / `spaDelay` / `cleanerDelay` are raw panel bytes, passed through
 uninterpreted and **consumed by nothing yet** — see Valve lag below.

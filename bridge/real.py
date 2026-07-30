@@ -58,6 +58,9 @@ def _panel_circuits(d):
     return circuits
 
 
+NO_DATA_BYTE = 0xFF
+
+
 def _pumps(d):
     """Only populated slots. A panel reports eight regardless of how many
     pumps exist; the empty ones carry nothing but a raw data blob."""
@@ -65,6 +68,12 @@ def _pumps(d):
     for pid, p in sorted((d.get("pump") or {}).items(), key=lambda kv: str(kv[0])):
         if not isinstance(p, dict) or "watts_now" not in p:
             continue
+        # 0xFF is the panel's "no reading" sentinel. Only applied to gpm: this
+        # pool reports 255 gpm, which is not a residential flow rate, and it
+        # read 255 on the old board and its replacement alike — so it is a
+        # missing value, not a measurement. 255 W or 255 rpm are both plausible
+        # readings, so they are passed through untouched.
+        gpm = _val(p.get("gpm_now"))
         pumps.append(
             {
                 "id": pid,
@@ -72,7 +81,7 @@ def _pumps(d):
                 "running": bool(_val(p.get("state"))),
                 "watts": _val(p.get("watts_now")),
                 "rpm": _val(p.get("rpm_now")),
-                "gpm": _val(p.get("gpm_now")),
+                "gpm": None if gpm == NO_DATA_BYTE else gpm,
             }
         )
     return pumps
@@ -93,29 +102,51 @@ _ALARM_LABELS = (
 )
 
 
-def _alerts(d):
-    sensor = d.get("controller", {}).get("sensor", {})
+def _status(d):
+    """Readings. Never a verdict — nothing here can be 'wrong'.
+
+    Kept apart from _alerts because conflating them is what made the page lie:
+    screenlogicpy reports SCG state as ON_OFF.from_bool(state & 0x01), i.e.
+    'the chlorinator is producing', and treating non-zero as a fault flagged a
+    perfectly healthy chlorinator every time it ran.
+    """
+    scg = d.get("scg") or {}
+    if not scg.get("scg_present"):
+        return []
+
+    sensor = scg.get("sensor") or {}
+    config = scg.get("configuration") or {}
     items = [
         {
-            "label": "Active alert",
-            "value": _val(sensor.get("active_alert"), 0),
-            "ok": not _val(sensor.get("active_alert"), 0),
+            "label": "Chlorinator",
+            "value": "Producing" if _val(sensor.get("state"), 0) else "Idle",
         }
     ]
+    salt = _val(sensor.get("salt_ppm"))
+    if salt is not None:
+        items.append({"label": "Salt", "value": f"{salt} ppm"})
+    for key, label in (("pool_setpoint", "Pool output"), ("spa_setpoint", "Spa output")):
+        pct = _val(config.get(key))
+        if pct is not None:
+            items.append({"label": label, "value": f"{pct}%"})
+    return items
 
-    scg = d.get("scg") or {}
-    if scg.get("scg_present"):
-        state = _val((scg.get("sensor") or {}).get("state"), 0)
-        salt = _val((scg.get("sensor") or {}).get("salt_ppm"))
-        items.append({"label": "Chlorinator", "value": state, "ok": not state})
-        if salt is not None:
-            items.append({"label": "Salt", "value": f"{salt} ppm", "ok": True})
+
+def _alerts(d):
+    """Faults only. An empty list is the healthy case and says so."""
+    items = []
+
+    alert = _val(d.get("controller", {}).get("sensor", {}).get("active_alert"), 0)
+    if alert:
+        # A panel alert code, not a flag: surfaced raw because its meaning is
+        # undocumented here, and inventing a label would be worse than showing
+        # the number.
+        items.append({"label": "Panel alert code", "value": alert})
 
     alarms = (d.get("intellichem") or {}).get("alarm") or {}
     for key, label in _ALARM_LABELS:
-        raw = _val(alarms.get(key), 0)
-        if raw:
-            items.append({"label": label, "value": raw, "ok": False})
+        if _val(alarms.get(key), 0):
+            items.append({"label": label, "value": "active"})
     return items
 
 
@@ -276,6 +307,7 @@ class RealBackend:
         return {
             "circuits": _panel_circuits(d),
             "pumps": _pumps(d),
+            "status": _status(d),
             "alerts": _alerts(d),
             "equipment": _equipment(d),
         }

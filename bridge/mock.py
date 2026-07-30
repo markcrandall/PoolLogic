@@ -18,18 +18,19 @@ from errors import BackendUnavailable
 APPLY_DELAY = 1.5    # seconds between command ack and visible state change
 DRIFT_PERIOD = 2.0   # seconds between temperature updates
 
-# What a panel might report back, using this pool's IDs plus two circuits that
-# config.json has no entry for — the case the config page has to make visible.
+# What a panel might report back: this pool's IDs as the replacement controller
+# numbers them, plus two circuits config.json has no entry for — the case the
+# config page has to make visible.
 PANEL_CIRCUIT_NAMES = {
     500: "Spa",
-    501: "Spa Jets",
+    501: "Jets",
     502: "Pool Light",
-    503: "Spa Light",
-    504: "Aux 4",
+    503: "Aux 3",
+    504: "Spa Light",
     505: "Pool",
-    508: "Waterfall",
-    510: "Cleaner",
-    511: "Spillway",
+    506: "Spillway",
+    507: "Cleaner",
+    510: "Feature 1",
 }
 
 
@@ -175,17 +176,22 @@ class MockBackend:
             }
         ]
 
-        alerts = [
-            {"label": "Active alert", "value": 0, "ok": True},
-            {"label": "Chlorinator", "value": 0, "ok": True},
-            {"label": "Salt", "value": "3400 ppm", "ok": True},
+        # Readings carry no verdict; only genuine faults land in alerts, so an
+        # empty alerts list is the healthy case.
+        status = [
+            {"label": "Chlorinator", "value": "Producing" if running else "Idle"},
+            {"label": "Salt", "value": "3400 ppm"},
+            {"label": "Pool output", "value": "35%"},
+            {"label": "Spa output", "value": "15%"},
         ]
+        alerts = []
         if self.alarm_injected:
-            alerts.insert(1, {"label": "Flow", "value": 1, "ok": False})
+            alerts.append({"label": "Flow", "value": "active"})
 
         return {
             "circuits": circuits,
             "pumps": pumps,
+            "status": status,
             "alerts": alerts,
             "equipment": {
                 "model": "MockTouch 8",
