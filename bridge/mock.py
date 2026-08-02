@@ -13,6 +13,8 @@ from contextlib import suppress
 from datetime import datetime
 
 from errors import BackendUnavailable
+from poollink import PoolLinkState
+from protocol import COM_OK, COM_POOL_UNREACHABLE
 
 
 APPLY_DELAY = 1.5    # seconds between command ack and visible state change
@@ -75,8 +77,15 @@ class MockBackend:
 
     @property
     def pool_up(self):
-        """Same accessor RealBackend exposes, for the status LED."""
+        """Same accessor RealBackend exposes."""
         return self.pool_link_up
+
+    @property
+    def link_state(self):
+        """What the status LED reads. The mock has no reconnect lifecycle and
+        no notion of "never connected" — its link is a switch — so it maps onto
+        the two states that switch can actually distinguish."""
+        return PoolLinkState.UP if self.pool_link_up else PoolLinkState.DOWN
 
     def start(self):
         self._drift_task = asyncio.get_event_loop().create_task(self._drift_loop())
@@ -125,7 +134,7 @@ class MockBackend:
             }
         return {
             "mock": True,
-            "comStatus": "ok" if self.pool_link_up else "pool_unreachable",
+            "comStatus": COM_OK if self.pool_link_up else COM_POOL_UNREACHABLE,
             "lastPoolContact": self._last_contact,
             "poolAgeSeconds": int(time.monotonic() - self._last_contact_mono),
             "freezeMode": self.freeze_mode,

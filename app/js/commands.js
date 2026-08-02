@@ -39,7 +39,12 @@ function failIfCurrent(id, since, event) {
   if (cur.state !== CmdState.PENDING || cur.since !== since) return;
   store.dispatchCommand(id, event);
   setTimeout(() => {
-    if (store.getCommand(id).state === CmdState.FAILED) {
+    // Only clear the failure this timer was armed for. A retry that fails
+    // again inside the window carries a later `since`, and clearing on state
+    // alone pulled the toast out from under it early — the same guard the
+    // PENDING check above uses, for the same reason.
+    const cur = store.getCommand(id);
+    if (cur.state === CmdState.FAILED && cur.since === since) {
       store.dispatchCommand(id, CmdEvent.CLEAR);
     }
   }, FAILED_CLEAR_MS);

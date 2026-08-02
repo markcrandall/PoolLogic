@@ -1,10 +1,16 @@
 // Boot, poll scheduler, and visibility handling. The scheduler is driven by
 // the connection FSM's current state after every transition — it owns all
 // timers and is the only caller of the API layer.
+//
+// The decision of what to arm lives in schedule.js (pure) and the in-flight
+// bookkeeping in pollguard.js; what is left here is the executor and the DOM
+// wiring, which is the part that genuinely needs a browser.
 
 import { store } from "./state.js";
 import { fetchState } from "./api.js";
-import { ConnState, ConnEvent, BACKOFF_SECONDS } from "./fsm/connection.js";
+import { ConnState, ConnEvent } from "./fsm/connection.js";
+import { nextSchedule } from "./schedule.js";
+import { createPollGuard } from "./pollguard.js";
 import * as panelView from "./views/panel.js";
 import * as configView from "./views/config.js";
 
@@ -15,35 +21,16 @@ const view = new URLSearchParams(location.search).has("config")
   : panelView;
 const { render, bindHandlers } = view;
 
-const POLL_INTERVAL_MS = 5000;
-// Comfortably past the 4s fetch timeout, so a normal reconnect poll always
-// settles and transitions out (cancelling this) long before it fires. It only
-// matters if a poll never settles at all, which would otherwise strand
-// RECONNECTING — the one state with no timer of its own.
-const RECONNECT_WATCHDOG_MS = 10000;
-
 // One timer, always cleared before a new one is armed (see schedule), so a
 // stale timer can never be delivered against the wrong state.
 let timer = null;
-let pollInFlight = false;
-// Bumped when a poll is given up on. Its eventual answer — if it ever comes —
-// is then discarded rather than counted a second time.
-let pollGeneration = 0;
-
-function abandonPoll() {
-  pollGeneration += 1;
-  // Also releases the in-flight latch: a poll that never settles would
-  // otherwise leave it set and silently swallow every future poll.
-  pollInFlight = false;
-}
+const polls = createPollGuard();
 
 async function poll() {
-  if (pollInFlight) return;
-  pollInFlight = true;
-  const generation = pollGeneration;
+  const token = polls.begin();
+  if (token === null) return; // one at a time
   const { event, data } = await fetchState();
-  if (generation !== pollGeneration) return; // superseded by the watchdog
-  pollInFlight = false;
+  if (!polls.settle(token)) return; // superseded by the watchdog
   store.dispatchConn(event, data);
   // A view may need data outside /api/state. It piggybacks on the poll cadence
   // rather than running its own timer, so the scheduler stays the only thing
@@ -56,37 +43,31 @@ function schedule() {
   timer = null;
   if (document.hidden) return; // paused; APP_WAKE restarts things
 
-  const { state, retryCount } = store.getState().conn;
-  switch (state) {
-    case ConnState.ONLINE:
-    case ConnState.DEGRADED:
-      timer = setTimeout(poll, POLL_INTERVAL_MS);
-      break;
-    case ConnState.BOOTING:
+  const plan = nextSchedule(store.getState().conn);
+  switch (plan.kind) {
+    case "poll":
       poll();
       break;
-    case ConnState.RECONNECTING:
+    case "pollAfter":
+      timer = setTimeout(poll, plan.delayMs);
+      break;
+    case "wait":
+      timer = setTimeout(() => store.dispatchConn(plan.event), plan.delayMs);
+      break;
+    case "watchdog":
       // Arm before polling: if the poll settles (it always should) the
       // resulting transition re-enters schedule(), which clears this.
       timer = setTimeout(() => {
         // The poll it was waiting on is written off here, so when the
         // watchdog counts this as a failed attempt the poll's own late
-        // POLL_FAIL cannot count it a second time and skip a backoff rung.
-        abandonPoll();
-        store.dispatchConn(ConnEvent.TIMER);
-      }, RECONNECT_WATCHDOG_MS);
+        // answer cannot count it a second time and skip a backoff rung.
+        polls.abandon();
+        store.dispatchConn(plan.event);
+      }, plan.delayMs);
       poll();
       break;
-    case ConnState.RETRY_WAIT: {
-      const idx = Math.min(retryCount - 1, BACKOFF_SECONDS.length - 1);
-      timer = setTimeout(
-        () => store.dispatchConn(ConnEvent.TIMER),
-        BACKOFF_SECONDS[idx] * 1000
-      );
+    case "idle":
       break;
-    }
-    case ConnState.OFFLINE:
-      break; // quiescent until RECONNECT_TAPPED or APP_WAKE
   }
 }
 

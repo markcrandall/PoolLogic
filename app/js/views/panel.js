@@ -17,7 +17,10 @@ import {
   commitSetpointDraft,
 } from "../commands.js";
 
-const STATUS = {
+// Moore output for the connection FSM. Exported because the config view shows
+// the same header dot, and a second copy of these colours (it had one, as a
+// nested ternary) is a second thing to keep in step.
+export const STATUS = {
   [ConnState.BOOTING]: { dot: "amber", banner: "Connecting…" },
   [ConnState.ONLINE]: { dot: "green", banner: null },
   [ConnState.DEGRADED]: {

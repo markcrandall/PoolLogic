@@ -2,17 +2,18 @@
 // applied. Everything else dispatches events (handlers) or reads state
 // (render). Same subscribe/notify idiom as SimpleShoppingList.
 
-import { transition } from "./fsm/connection.js";
+import { transition, ConnState, ComStatus } from "./fsm/connection.js";
 import {
   commandTransition,
   idleCommand,
+  CmdState,
   CmdEvent,
 } from "./fsm/command.js";
 import { CONTROLS } from "./controls.js";
 
 export const store = {
   _state: {
-    conn: { state: "BOOTING", retryCount: 0 },
+    conn: { state: ConnState.BOOTING, retryCount: 0 },
     pool: null,           // last-known /api/state payload
     lastUpdated: null,    // Date of last successful poll (ok or pool-down)
     commands: {},         // controlId -> command FSM instance
@@ -42,7 +43,7 @@ export const store = {
       this._state.lastUpdated = new Date();
       // Pool-down payloads carry the bridge's last CACHED state, which must
       // not confirm pending commands the equipment may never have seen.
-      if (pollData.comStatus === "ok") {
+      if (pollData.comStatus === ComStatus.OK) {
         this._confirmPendingCommands(pollData);
       }
     }
@@ -66,7 +67,9 @@ export const store = {
   // with structured targets provide their own confirmed() predicate.
   _confirmPendingCommands(pool) {
     for (const [id, cmd] of Object.entries(this._state.commands)) {
-      if (cmd.state !== "PENDING") continue;
+      // States are a closed type, never a string in logic: a typo here would
+      // silently disable command confirmation for every control at once.
+      if (cmd.state !== CmdState.PENDING) continue;
       const control = CONTROLS[id];
       const done = control.confirmed
         ? control.confirmed(pool, cmd.target)

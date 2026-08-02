@@ -20,6 +20,7 @@ from aiohttp import web
 from errors import BackendUnavailable
 from led import StatusLedTask
 from mock import MockBackend
+from protocol import COM_POOL_UNREACHABLE
 
 # mimetypes consults the Windows registry, so the type served for .js is
 # machine state, not a constant — some installs map it to text/plain or
@@ -160,7 +161,7 @@ class Api:
         try:
             await coro
         except BackendUnavailable:
-            return web.json_response({"error": "pool_unreachable"}, status=503)
+            return web.json_response({"error": COM_POOL_UNREACHABLE}, status=503)
         return web.json_response({})
 
     def _body_name(self, request):
@@ -413,7 +414,7 @@ def main():
 
     app = build_app(backend, config, mock_controls=mock_controls)
 
-    status_led = StatusLedTask(config, lambda: backend.pool_up)
+    status_led = StatusLedTask(config, lambda: backend.link_state)
 
     async def on_startup(_app):
         # start() is synchronous by design — it only spawns tasks, so there is

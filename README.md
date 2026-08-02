@@ -54,12 +54,17 @@ failure injection at `/dev.html`) so the entire client — including every
 failure path — can be exercised with no equipment. The app shows an amber
 MOCK badge whenever it's talking to the simulator.
 
-The connection FSM is pure and total, so its tests need no browser, no server
-and no dependencies — just Node's built-in runner from the repo root:
+Every state machine here is pure and total, so the tests need no browser, no
+server and no equipment — just the built-in runners, from the repo root:
 
 ```
-node --test
+node --test                              # client FSMs, scheduler, store, docs
+python -m unittest discover -s tests     # the bridge's pool-link FSM
 ```
+
+The doc test is not ceremony: it parses the transition table in DESIGN.md and
+asserts it against the code in both directions, because that table once
+described a livelock the code had already fixed.
 
 Design decisions, API contract, and the FSM transition tables are in
 [DESIGN.md](DESIGN.md).

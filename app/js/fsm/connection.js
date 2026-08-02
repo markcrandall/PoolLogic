@@ -20,6 +20,16 @@ export const ConnEvent = Object.freeze({
   APP_WAKE: "APP_WAKE",
 });
 
+// The bridge's comStatus wire values — the client's only input for the
+// pool-link half of this machine. api.js maps anything that is not OK onto
+// POLL_POOL_DOWN: the safe direction, but a silent one, so a value renamed on
+// the bridge would pin every phone in DEGRADED with nothing to show for it.
+// Naming them makes that a two-place edit. Bridge copy: bridge/protocol.py.
+export const ComStatus = Object.freeze({
+  OK: "ok",
+  POOL_UNREACHABLE: "pool_unreachable",
+});
+
 export const MAX_ATTEMPTS = 5;
 export const BACKOFF_SECONDS = [2, 4, 8, 15, 30];
 
@@ -86,6 +96,12 @@ const TABLE = {
     [ConnEvent.APP_WAKE]: manualRetry,
   },
 };
+
+// Exported for the DESIGN.md drift check in tests/design.doc.test.mjs, which
+// asserts the documented table and this one describe the same machine. The doc
+// once described a livelock the code had already fixed, and anyone reconciling
+// the code to it would have put the bug back.
+export { TABLE as CONNECTION_TABLE };
 
 export function transition(conn, event) {
   const fn = TABLE[conn.state]?.[event];

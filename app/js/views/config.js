@@ -9,14 +9,21 @@
 // live state as things switch.
 //
 // Same Moore discipline as the panel: render() derives everything from the
-// state passed in, and nothing here mutates state or sends commands.
+// state passed in, and nothing here mutates state or sends commands. Each
+// fetched resource carries a load FSM rather than a nullable variable, so
+// "still loading" and "the fetch failed" are different answers and the second
+// one is recoverable — see fsm/load.js.
 
 import { ConnState } from "../fsm/connection.js";
+import { LoadState, LoadEvent, loading, loadTransition } from "../fsm/load.js";
 import { fetchConfig, fetchPanelInfo } from "../api.js";
+import { STATUS } from "./panel.js";
 import { store } from "../state.js";
 
-let config = null;
-let panel = null;
+// The state register for each resource: one place per resource that applies a
+// load transition, same rule the store follows for the connection FSM.
+const configRes = { load: loading };
+const panelRes = { load: loading };
 
 export function bindHandlers() {
   // Swap the pool controls out for the config view. Both live in index.html so
@@ -29,18 +36,34 @@ export function bindHandlers() {
   // Async, but the view renders fine without it — the rows simply appear once
   // it lands. Re-render explicitly because a config fetch is not a state
   // transition and will not notify subscribers on its own.
-  fetchConfig().then((loaded) => {
-    config = loaded;
-    render(store.getState());
-  });
+  fetchInto(configRes, fetchConfig);
   afterPoll();
 }
 
 // Called by the scheduler after each poll, so this view never owns a timer.
 export function afterPoll() {
-  fetchPanelInfo().then((loaded) => {
-    if (loaded === null) return; // keep the last good data rather than blanking
-    panel = loaded;
+  // The circuit map is static and so is fetched once — but a failed fetch must
+  // not be final, which is what it used to be. FAILED is the only state RETRY
+  // moves, and this is the only caller that can be in it, so a dropped fetch
+  // recovers on the next poll and no second fetch can stack behind one still
+  // in flight.
+  if (configRes.load.state === LoadState.FAILED) {
+    fetchInto(configRes, fetchConfig);
+  }
+  fetchInto(panelRes, fetchPanelInfo);
+}
+
+function fetchInto(res, fetcher) {
+  // Ignored outside FAILED; dispatching it unconditionally is what lets the
+  // panel fetch — which runs every poll — climb back out of a failure without
+  // a second code path.
+  res.load = loadTransition(res.load, LoadEvent.RETRY);
+  fetcher().then((data) => {
+    res.load = loadTransition(
+      res.load,
+      data === null ? LoadEvent.FETCH_FAIL : LoadEvent.FETCH_OK,
+      data
+    );
     render(store.getState());
   });
 }
@@ -48,16 +71,41 @@ export function afterPoll() {
 export function render(state) {
   const { conn, pool } = state;
   const live = conn.state === ConnState.ONLINE;
+  const config = configRes.load.data;
+  const panel = panelRes.load.data;
 
-  const dot = document.getElementById("com-dot");
-  dot.className = "com-dot " + (live ? "green" : conn.state === ConnState.OFFLINE ? "red" : "amber");
+  // Shared with the panel view so the two pages cannot disagree about what a
+  // connection state looks like.
+  document.getElementById("com-dot").className =
+    "com-dot " + STATUS[conn.state].dot;
   document.getElementById("mock-badge").classList.toggle("hidden", !pool?.mock);
 
+  // Every table renders independently. A failed config fetch used to return
+  // here and take the panel's own tables down with it — and the panel's list
+  // is precisely what is useful at the pad when the map is unavailable.
+  renderConfigCircuits(config, pool, live);
+  renderPanelCircuits(panel, config, live);
+  renderPumps(panel, live);
+  renderStatus(panel, live);
+  renderAlerts(panel, live);
+  renderEquipment(panel, config);
+}
+
+// What to say when a table has no data: "not here yet" and "the fetch failed"
+// are different answers, which is the whole reason the load FSM exists.
+function pendingNote(res, what) {
+  return res.load.state === LoadState.FAILED
+    ? `Couldn't read ${what} — retrying.`
+    : `Reading ${what}…`;
+}
+
+// config.json's map: our name for each circuit, and the ID we actuate for it.
+function renderConfigCircuits(config, pool, live) {
   const note = document.getElementById("config-note");
   const tbody = document.querySelector("#config-circuits tbody");
 
   if (config === null) {
-    note.textContent = "Loading circuit map…";
+    note.textContent = pendingNote(configRes, "the circuit map");
     return;
   }
 
@@ -85,24 +133,18 @@ export function render(state) {
   note.textContent = live
     ? "Switch each circuit from the panel and watch which row changes — that is the ID it is really bound to."
     : "Not connected — states below are not current.";
-
-  renderPanelCircuits(live);
-  renderPumps(live);
-  renderStatus(live);
-  renderAlerts(live);
-  renderEquipment();
 }
 
 // The panel's own list: every circuit it reports, under the name it gives it.
 // Rows the config map does not claim are flagged, because after a controller
 // swap those are exactly where the missing equipment went.
-function renderPanelCircuits(live) {
+function renderPanelCircuits(panel, config, live) {
   const tbody = document.querySelector("#panel-circuits tbody");
   const note = document.getElementById("panel-note");
   const panelCircuits = panel?.circuits ?? null;
 
   if (panelCircuits === null) {
-    note.textContent = "Reading the panel…";
+    note.textContent = pendingNote(panelRes, "the panel");
     return;
   }
   if (panelCircuits.length === 0) {
@@ -111,6 +153,11 @@ function renderPanelCircuits(live) {
     return;
   }
 
+  // Without the map there is nothing to be missing from. Flagging every row
+  // "not in config" because /api/config failed would raise exactly the alarm
+  // this page exists to raise — a controller that renumbered everything —
+  // over a dropped fetch.
+  const known = config !== null;
   const mapped = new Map(
     Object.entries(config?.circuitIds ?? {}).map(([name, id]) => [id, name])
   );
@@ -122,25 +169,31 @@ function renderPanelCircuits(live) {
         ["config-id", String(circuit.id)],
         ["config-name", circuit.name ?? "(unnamed)"],
         ["config-state", !live ? "—" : circuit.on ? "On" : "Off", live && circuit.on],
-        ["config-note-cell", ours ? `= ${ours}` : "not in config", !ours],
+        ["config-note-cell", !known ? "—" : ours ? `= ${ours}` : "not in config", known && !ours],
       ]);
     })
   );
 
   const unmapped = panelCircuits.filter((c) => !mapped.has(c.id)).length;
-  note.textContent = unmapped
-    ? `${panelCircuits.length} circuits reported; ${unmapped} not in config.json.`
-    : `${panelCircuits.length} circuits reported, all mapped.`;
+  note.textContent =
+    !known
+      ? `${panelCircuits.length} circuits reported; ${pendingNote(configRes, "the circuit map").toLowerCase()}`
+      : unmapped
+        ? `${panelCircuits.length} circuits reported; ${unmapped} not in config.json.`
+        : `${panelCircuits.length} circuits reported, all mapped.`;
 }
 
 // Live pump telemetry. Only populated slots come back — a panel reports eight
 // regardless of how many pumps exist.
-function renderPumps(live) {
+function renderPumps(panel, live) {
   const tbody = document.querySelector("#panel-pumps tbody");
   const note = document.getElementById("pumps-note");
   const pumps = panel?.pumps ?? null;
 
-  if (pumps === null) return;
+  if (pumps === null) {
+    note.textContent = pendingNote(panelRes, "pump telemetry");
+    return;
+  }
   if (pumps.length === 0) {
     tbody.replaceChildren();
     note.textContent = "No pump telemetry reported.";
@@ -164,12 +217,15 @@ function renderPumps(live) {
 
 // Readings, not verdicts. Nothing here can be "wrong", so no row carries an
 // ok/attention flag — a producing chlorinator is just a producing chlorinator.
-function renderStatus(live) {
+function renderStatus(panel, live) {
   const tbody = document.querySelector("#panel-status tbody");
   const note = document.getElementById("status-note");
   const status = panel?.status ?? null;
 
-  if (status === null) return;
+  if (status === null) {
+    note.textContent = pendingNote(panelRes, "panel readings");
+    return;
+  }
   if (status.length === 0) {
     tbody.replaceChildren();
     note.textContent = "No chlorinator reported.";
@@ -188,12 +244,17 @@ function renderStatus(live) {
 
 // Faults only. Every row here is something wrong, so every row is flagged; an
 // empty table is the healthy case and says so rather than sitting blank.
-function renderAlerts(live) {
+function renderAlerts(panel, live) {
   const tbody = document.querySelector("#panel-alerts tbody");
   const note = document.getElementById("alerts-note");
   const alerts = panel?.alerts ?? null;
 
-  if (alerts === null) return;
+  if (alerts === null) {
+    // "Nothing reported" and "we could not ask" must not look the same on a
+    // table whose empty state means everything is fine.
+    note.textContent = pendingNote(panelRes, "alerts");
+    return;
+  }
   tbody.replaceChildren(
     ...alerts.map((a) =>
       cells([
@@ -209,10 +270,14 @@ function renderAlerts(live) {
       : "Nothing reported.";
 }
 
-function renderEquipment() {
+function renderEquipment(panel, config) {
   const dl = document.getElementById("panel-equipment");
+  const note = document.getElementById("equipment-note");
   const e = panel?.equipment ?? null;
-  if (e === null) return;
+  if (e === null) {
+    note.textContent = pendingNote(panelRes, "equipment");
+    return;
+  }
 
   const rows = [
     ["Model", e.model ?? "—"],
@@ -234,7 +299,6 @@ function renderEquipment() {
 
   // The panel's own bounds are authoritative; config.json duplicates them.
   const configured = config?.setpointMax;
-  const note = document.getElementById("equipment-note");
   note.textContent =
     configured != null && e.maxSetpoint != null && configured !== e.maxSetpoint
       ? `config.json caps the setpoint at ${configured}°, but the panel allows ${e.maxSetpoint}°.`

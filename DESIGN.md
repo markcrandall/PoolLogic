@@ -225,6 +225,49 @@ Rejections are logged (flushed — systemd buffers otherwise) because an honest
 wrong hostname and an attack look identical from outside, and a 403 on the
 family URL has to be diagnosable from `journalctl`.
 
+### Panel does not hold circuit state (open, 2026-07-30)
+
+After the controller replacement, pressing Spa reports "Command failed — the
+pool didn't respond" while the equipment appears to change. Measured with
+`bridge/watch_circuits.py`:
+
+- Our reads are correct. A circuit switched from the ScreenLogic app shows up
+  in our data immediately.
+- Our writes reach the panel and take effect. `async_set_circuit` flips the
+  circuit within a second.
+- **The panel reverts every circuit after 1–2 seconds** — feature circuits, the
+  pool body and the spa body alike, from PoolLogic and from Pentair's own app
+  identically. Nothing holds.
+
+So the app is behaving correctly: it asked, the pool did not hold the state,
+and it declined to claim success. Only the wording is wrong — "the pool didn't
+respond" sends you looking for a network fault when the pool responded and then
+undid the change.
+
+Two conclusions were reached and discarded along the way, both from sampling
+too slowly. Polling 8 seconds after a command showed no change at all, which
+looked like "our writes do nothing" and then like "the panel blocks remote
+commands" — the pulse had simply ended before every sample. The bridge polls at
+10s and the client at 5s, so neither can see a 2s transition. Fast sampling is
+the only way to observe this class of fault, which is what `watch_circuits.py`
+exists for.
+
+`controller.sensor.state` reads `3`, which screenlogicpy labels `SERVICE`, and
+that remains the best available explanation. It is **not proven**: the enum is
+used nowhere in that library, no behaviour depends on it, and a hard service
+block would not have let circuits switch on even briefly. The decisive test is
+operating a circuit from the panel's own controls — if the panel cannot hold it
+either, this is a panel configuration or installation issue and no software
+change addresses it.
+
+No client change has been made pending that answer, deliberately: a friendlier
+message asserting "Service mode" would be shipping a guess as a diagnosis.
+
+**Update, 2026-08-01:** the byte now reads `1` (`READY`); it was `3` throughout
+every failed test. If circuits hold now, that is the controlled result the
+label needed — state changed and behaviour changed with it — and the surviving
+work is the wording, not the diagnosis. Retest before concluding.
+
 ### Valve lag (open)
 
 Circuit flags follow the relay; valve actuators take ~20-30s to rotate. So the
@@ -282,6 +325,36 @@ Translation of the SystemVerilog pattern:
 States: `BOOTING, ONLINE, DEGRADED, RETRY_WAIT, RECONNECTING, OFFLINE`
 Events: `POLL_OK, POLL_POOL_DOWN, POLL_FAIL, TIMER, RECONNECT_TAPPED, APP_WAKE`
 
+```mermaid
+stateDiagram-v2
+    [*] --> BOOTING
+    BOOTING --> ONLINE: POLL_OK
+    BOOTING --> DEGRADED: POLL_POOL_DOWN
+    BOOTING --> RETRY_WAIT: POLL_FAIL
+    ONLINE --> ONLINE: POLL_OK
+    ONLINE --> DEGRADED: POLL_POOL_DOWN
+    ONLINE --> RETRY_WAIT: POLL_FAIL
+    DEGRADED --> ONLINE: POLL_OK
+    DEGRADED --> DEGRADED: POLL_POOL_DOWN
+    DEGRADED --> RETRY_WAIT: POLL_FAIL
+    RETRY_WAIT --> RECONNECTING: TIMER
+    RETRY_WAIT --> ONLINE: POLL_OK
+    RETRY_WAIT --> DEGRADED: POLL_POOL_DOWN
+    RETRY_WAIT --> RETRY_WAIT: POLL_FAIL [count &lt; 5]
+    RETRY_WAIT --> OFFLINE: POLL_FAIL [count = 5]
+    RECONNECTING --> ONLINE: POLL_OK
+    RECONNECTING --> DEGRADED: POLL_POOL_DOWN
+    RECONNECTING --> RETRY_WAIT: POLL_FAIL / TIMER [count &lt; 5]
+    RECONNECTING --> OFFLINE: POLL_FAIL / TIMER [count = 5]
+    OFFLINE --> RECONNECTING: RECONNECT_TAPPED / APP_WAKE
+```
+
+The diagram is hand-written, but the table below is not decoration:
+`tests/design.doc.test.mjs` parses it and asserts every row against
+`fsm/connection.js`, in both directions. Drift surfaces as a failing test
+rather than as a document nobody re-reads — which is how the `RETRY_WAIT |
+POLL_FAIL` row below came to describe a livelock the code had already fixed.
+
 | State | Event | Next | Action / notes |
 |---|---|---|---|
 | BOOTING | POLL_OK | ONLINE | first fetch on load |
@@ -295,14 +368,23 @@ Events: `POLL_OK, POLL_POOL_DOWN, POLL_FAIL, TIMER, RECONNECT_TAPPED, APP_WAKE`
 | DEGRADED | POLL_FAIL | RETRY_WAIT | retryCount = 1 |
 | RETRY_WAIT | TIMER | RECONNECTING | backoff schedule 2, 4, 8, 15, 30 s |
 | RETRY_WAIT | POLL_OK / POLL_POOL_DOWN | ONLINE / DEGRADED | wake-triggered poll honored (added 2026-07-24) |
-| RETRY_WAIT | POLL_FAIL | RETRY_WAIT | count unchanged; backoff re-arms |
+| RETRY_WAIT | POLL_FAIL (count < 5) | RETRY_WAIT | retryCount++ — a wake poll's failure is a real attempt (corrected 2026-08-01) |
+| RETRY_WAIT | POLL_FAIL (count = 5) | OFFLINE | gave up |
 | RECONNECTING | POLL_OK | ONLINE | retryCount reset |
 | RECONNECTING | POLL_POOL_DOWN | DEGRADED | retryCount reset |
 | RECONNECTING | POLL_FAIL (count < 5) | RETRY_WAIT | retryCount++ |
 | RECONNECTING | POLL_FAIL (count = 5) | OFFLINE | gave up |
+| RECONNECTING | TIMER (count < 5) | RETRY_WAIT | watchdog: a poll that never settled, counted as one failed attempt |
+| RECONNECTING | TIMER (count = 5) | OFFLINE | gave up |
 | OFFLINE | RECONNECT_TAPPED | RECONNECTING | manual reconnect (requirement) |
 | OFFLINE | APP_WAKE | RECONNECTING | phone unlocked / tab visible again |
-| RECONNECTING | TIMER | RETRY_WAIT / OFFLINE | watchdog: a poll that never settled, counted as a failed attempt |
+
+The `RETRY_WAIT | POLL_FAIL` rows used to read "count unchanged; backoff
+re-arms". That is the livelock `tests/connection.fsm.test.mjs` was written to
+prevent: a wake-triggered poll can fail while the backoff is still pending, and
+not counting it pins the banner at "Reconnecting (3/5)" forever — OFFLINE is
+never reached, so the Reconnect button, which only renders there, is never
+offered. The count must advance.
 
 `APP_WAKE` is dispatched **only** in OFFLINE (`app.js`, visibility handler).
 Waking in any other state fires an immediate `poll()` directly instead — the
@@ -327,14 +409,32 @@ Polling: `GET /api/state` every 5 s while page visible; paused when hidden
 ### 4.2 Command FSM (one instance per control)
 
 States: `IDLE, PENDING, FAILED`
+Events: `TAP, CONFIRMED, HTTP_ERROR, TIMEOUT, CLEAR`
+
+```mermaid
+stateDiagram-v2
+    [*] --> IDLE
+    IDLE --> PENDING: TAP
+    PENDING --> IDLE: CONFIRMED
+    PENDING --> FAILED: HTTP_ERROR
+    PENDING --> FAILED: TIMEOUT
+    FAILED --> IDLE: CLEAR
+    FAILED --> PENDING: TAP
+```
 
 | State | Event | Next | Action / notes |
 |---|---|---|---|
-| IDLE | TAP | PENDING | POST sent; spinner on control; further taps ignored |
-| PENDING | poll confirms target value | IDLE | **the pool is the source of truth** |
-| PENDING | HTTP error | FAILED | |
-| PENDING | 10 s timeout without confirmation | FAILED | |
-| FAILED | 3 s auto | IDLE | toast shown; UI reverts to actual polled state |
+| IDLE | TAP | PENDING | POST sent; spinner on control |
+| PENDING | CONFIRMED | IDLE | a poll reports the target value — **the pool is the source of truth** |
+| PENDING | HTTP_ERROR | FAILED | |
+| PENDING | TIMEOUT | FAILED | 10 s without confirmation |
+| FAILED | CLEAR | IDLE | 3 s auto-clear; toast shown, UI reverts to the polled state |
+| FAILED | TAP | PENDING | retry after a failure |
+
+`PENDING | TAP` is deliberately absent, and the no-op returns the *same object*
+rather than a copy: `commands.js` detects the ignored tap by identity, and that
+identity check is the only thing standing between a double-tap and two POSTs to
+pool equipment.
 
 Multi-phone coherence falls out for free: every device renders whatever truth
 the next poll delivers (e.g., spouse turns on spa → your phone shows it within

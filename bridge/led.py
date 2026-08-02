@@ -4,11 +4,11 @@ Drives either the Pi's onboard ACT LED (sysfs, no extra hardware) or external
 GPIO LED(s) (requires the soldered header and gpiozero). On machines with
 neither (e.g. the Windows dev box), resolves to a no-op.
 
-Patterns (single LED):
-    rapid blink   starting / first connect not yet succeeded
-    heartbeat     bridge up, pool link OK (short flash every 3s)
-    steady blink  pool unreachable (1s cycle)
-    dark          bridge not running
+Patterns (single LED), one per pool-link state — see bridge/poollink.py:
+    rapid blink   NEVER_CONNECTED: first connect has not succeeded yet
+    heartbeat     UP: bridge up, pool link OK (short flash every 3s)
+    steady blink  DOWN: was up, pool now unreachable (1s cycle)
+    dark          CLOSED / bridge not running
 
 Dual-LED GPIO mode (okPin + downPin): green heartbeats when OK, red is solid
 when the pool link is down.
@@ -25,12 +25,25 @@ import asyncio
 import os
 from contextlib import suppress
 
+from poollink import PoolLinkState
+
 ACT_LED_PATHS = ("/sys/class/leds/ACT", "/sys/class/leds/led0")
 
 HEARTBEAT_PERIOD = 3.0
 HEARTBEAT_FLASH = 0.12
 DOWN_BLINK = 0.5
 STARTING_BLINK = 0.15
+
+# Moore output: (flash seconds, gap seconds) per link state, flash None = dark.
+# This used to be an if/elif ladder over `up` plus an `_ever_ok` latch that
+# re-derived NEVER_CONNECTED here, independently of the backend. The state now
+# arrives already made, and the four documented patterns are four rows.
+PATTERNS = {
+    PoolLinkState.NEVER_CONNECTED: (STARTING_BLINK, STARTING_BLINK),
+    PoolLinkState.UP: (HEARTBEAT_FLASH, HEARTBEAT_PERIOD - HEARTBEAT_FLASH),
+    PoolLinkState.DOWN: (DOWN_BLINK, DOWN_BLINK),
+    PoolLinkState.CLOSED: (None, DOWN_BLINK),
+}
 
 
 class NullLed:
@@ -104,13 +117,12 @@ def _make_single(cfg):
 
 
 class StatusLedTask:
-    """Async pattern driver. Reads the backend's pool_up flag each cycle."""
+    """Async pattern driver. Reads the backend's link state each cycle."""
 
-    def __init__(self, config, get_pool_up):
+    def __init__(self, config, get_link_state):
         cfg = config.get("statusLed", {})
         self.ok_led, self.down_led = _make_single(cfg)
-        self.get_pool_up = get_pool_up
-        self._ever_ok = False
+        self.get_link_state = get_link_state
         self._task = None
 
     def start(self):
@@ -141,28 +153,25 @@ class StatusLedTask:
     async def _run(self):
         try:
             while True:
-                up = bool(self.get_pool_up())
-                if up:
-                    self._ever_ok = True
+                state = self.get_link_state()
+                up = state is PoolLinkState.UP
 
                 if self.down_led is not None:
-                    # Dual-LED: green heartbeat / solid red
+                    # Dual-LED: red carries "not up" on its own, so green sits
+                    # dark rather than also blinking the single-LED patterns.
                     self.down_led.set(not up)
-                    if up:
-                        await self._flash(self.ok_led, HEARTBEAT_FLASH)
-                        await asyncio.sleep(HEARTBEAT_PERIOD - HEARTBEAT_FLASH)
-                    else:
+                    if not up:
                         self.ok_led.set(False)
-                        await asyncio.sleep(0.5)
-                elif up:
-                    await self._flash(self.ok_led, HEARTBEAT_FLASH)
-                    await asyncio.sleep(HEARTBEAT_PERIOD - HEARTBEAT_FLASH)
-                elif not self._ever_ok:
-                    await self._flash(self.ok_led, STARTING_BLINK)
-                    await asyncio.sleep(STARTING_BLINK)
+                        await asyncio.sleep(DOWN_BLINK)
+                        continue
+
+                flash, gap = PATTERNS.get(state, PATTERNS[PoolLinkState.DOWN])
+                if flash is None:
+                    self.ok_led.set(False)
+                    await asyncio.sleep(gap)
                 else:
-                    await self._flash(self.ok_led, DOWN_BLINK)
-                    await asyncio.sleep(DOWN_BLINK)
+                    await self._flash(self.ok_led, flash)
+                    await asyncio.sleep(gap)
         finally:
             # Never let a failed sysfs write during shutdown escape a cancelled
             # task and surface as a cleanup error.

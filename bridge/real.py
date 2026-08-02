@@ -14,6 +14,15 @@ from screenlogicpy.device_const.heat import HEAT_MODE, HEAT_STATE
 from screenlogicpy.device_const.system import COLOR_MODE
 
 from errors import BackendUnavailable
+from poollink import (
+    LinkAction,
+    PoolLinkEvent,
+    PoolLinkState,
+    RECONNECT_BACKOFF_START,
+    link_transition,
+    next_backoff,
+)
+from protocol import COM_OK, COM_POOL_UNREACHABLE
 
 SHOW_COMMANDS = {
     "white": COLOR_MODE.WHITE.value,
@@ -25,9 +34,6 @@ BODY_INDEX = {"pool": 0, "spa": 1}
 # The client confirms commands by polling, with a 10s deadline; refresh the
 # adapter data quickly after any command so confirmation beats the deadline.
 COMMAND_REFRESH_DELAYS = (1.0, 3.5)
-
-RECONNECT_BACKOFF_START = 5
-RECONNECT_BACKOFF_MAX = 60
 
 
 def _now():
@@ -173,7 +179,7 @@ class RealBackend:
         self.circuit_ids = config["circuitIds"]
         self.poll_seconds = config.get("adapterPollSeconds", 10)
         self.gateway = ScreenLogicGateway()
-        self.pool_up = False
+        self._link = PoolLinkState.NEVER_CONNECTED
         self._last_contact = None
         # Measured on the monotonic clock, not the wall clock: a headless Pi
         # with no RTC can step its wall clock by hours when NTP first lands,
@@ -184,6 +190,39 @@ class RealBackend:
         self._lock = asyncio.Lock()
         self._refresh_task = None
         self._run_task = None
+
+    # -- Link state -------------------------------------------------------
+
+    @property
+    def pool_up(self):
+        """Kept under the name every reader already uses: get_state()'s
+        comStatus and _cmd()'s gate. Read-only now — the link is only moved
+        through _dispatch, so the exit action can never be skipped."""
+        return self._link is PoolLinkState.UP
+
+    @property
+    def link_state(self):
+        """For the status LED, which needs the distinction pool_up cannot
+        make: never connected yet vs was up and dropped."""
+        return self._link
+
+    async def _dispatch(self, event):
+        """The single writer. Every path that used to assign pool_up comes
+        through here, so a link that goes down always hands the socket back —
+        the post-command refresh used to flip it down and leave the gateway
+        connected to something that had stopped answering.
+
+        Never call this while holding _lock: the disconnect action takes it and
+        asyncio.Lock is not reentrant.
+        """
+        before = self._link
+        self._link, action = link_transition(self._link, event)
+        if self._link is not before:
+            print(f"pool link {before.value} -> {self._link.value}", flush=True)
+        if action is LinkAction.DISCONNECT:
+            async with self._lock:
+                with suppress(Exception):  # already down / never connected
+                    await self.gateway.async_disconnect(force=True)
 
     def start(self):
         self._run_task = asyncio.get_event_loop().create_task(self._run_loop())
@@ -204,10 +243,10 @@ class RealBackend:
                 with suppress(asyncio.CancelledError):
                     await task
         self._run_task = self._refresh_task = None
-        async with self._lock:
-            with suppress(Exception):  # already down / never connected
-                await self.gateway.async_disconnect(force=True)
-        self.pool_up = False
+        # Outside any lock hold, and after the tasks are gone: the disconnect
+        # is the SHUTDOWN transition's exit action, and CLOSED is terminal, so
+        # a stray refresh cannot walk the link back up behind us.
+        await self._dispatch(PoolLinkEvent.SHUTDOWN)
 
     async def _run_loop(self):
         backoff = RECONNECT_BACKOFF_START
@@ -217,24 +256,19 @@ class RealBackend:
                 backoff = RECONNECT_BACKOFF_START
                 await asyncio.sleep(self.poll_seconds)
             except Exception as ex:
-                self.pool_up = False
-                print(f"pool link down ({ex!r}); retrying in {backoff}s")
-                async with self._lock:
-                    try:
-                        await self.gateway.async_disconnect(force=True)
-                    except Exception:
-                        pass
+                print(f"pool refresh failed ({ex!r}); retrying in {backoff}s")
+                await self._dispatch(PoolLinkEvent.REFRESH_FAIL)
                 await asyncio.sleep(backoff)
-                backoff = min(backoff * 2, RECONNECT_BACKOFF_MAX)
+                backoff = next_backoff(backoff)
 
     async def _refresh(self):
         async with self._lock:
             if not self.gateway.is_connected:
                 await self.gateway.async_connect(ip=self.ip)
             await self.gateway.async_update()
-        self.pool_up = True
         self._last_contact = _now()
         self._last_contact_mono = time.monotonic()
+        await self._dispatch(PoolLinkEvent.REFRESH_OK)
 
     # -- Queries ----------------------------------------------------------
 
@@ -261,7 +295,7 @@ class RealBackend:
         # itself, never which circuits it forced on.
         sensor = d.get("controller", {}).get("sensor", {})
         return {
-            "comStatus": "ok" if self.pool_up else "pool_unreachable",
+            "comStatus": COM_OK if self.pool_up else COM_POOL_UNREACHABLE,
             "lastPoolContact": self._last_contact,
             # How old the readings below actually are. While the pool link is
             # down this keeps climbing even though /api/state still answers
@@ -290,7 +324,9 @@ class RealBackend:
         }
 
     def _pool_age(self):
-        if self._last_contact_mono is None:
+        # NEVER_CONNECTED carries the same fact the None sentinel used to carry
+        # by itself; the monotonic stamp is only ever set on the way out of it.
+        if self._link is PoolLinkState.NEVER_CONNECTED or self._last_contact_mono is None:
             return None  # never reached the adapter since boot
         return int(time.monotonic() - self._last_contact_mono)
 
@@ -366,5 +402,10 @@ class RealBackend:
             await asyncio.sleep(delay)
             try:
                 await self._refresh()
-            except Exception:
-                self.pool_up = False
+            except Exception as ex:
+                # Same entry point as the run loop's failure path, so this now
+                # hands the socket back too. It used to flip the link down and
+                # leave the gateway holding a connection that had stopped
+                # answering, for the run loop to trip over on its next pass.
+                print(f"post-command refresh failed ({ex!r})")
+                await self._dispatch(PoolLinkEvent.REFRESH_FAIL)

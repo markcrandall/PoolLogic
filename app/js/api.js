@@ -1,7 +1,7 @@
 // Fetch wrappers. These translate HTTP outcomes into FSM events and never
 // touch state or the DOM directly.
 
-import { ConnEvent } from "./fsm/connection.js";
+import { ConnEvent, ComStatus } from "./fsm/connection.js";
 
 const FETCH_TIMEOUT_MS = 4000; // state polls stay snappy
 // Commands can queue behind the bridge's adapter lock (refresh/reconnect in
@@ -19,14 +19,27 @@ export async function fetchState() {
     });
     if (!res.ok) return { event: ConnEvent.POLL_FAIL, data: null };
     const data = await res.json();
-    const event =
-      data.comStatus === "ok" ? ConnEvent.POLL_OK : ConnEvent.POLL_POOL_DOWN;
-    return { event, data };
+    return { event: comEvent(data.comStatus), data };
   } catch {
     return { event: ConnEvent.POLL_FAIL, data: null };
   } finally {
     clearTimeout(timer);
   }
+}
+
+// Anything that is not "ok" means the bridge answered but the pool link is
+// down, and treating an unrecognized value that way is the safe direction: it
+// is the only one that stops a cached payload being read as live. It is also
+// the silent one — an unknown value would pin every phone in DEGRADED forever
+// — so it is taken deliberately and said out loud.
+function comEvent(comStatus) {
+  if (comStatus === ComStatus.OK) return ConnEvent.POLL_OK;
+  if (comStatus !== ComStatus.POOL_UNREACHABLE) {
+    console.warn(
+      `unknown comStatus ${JSON.stringify(comStatus)}; treating the pool link as down`
+    );
+  }
+  return ConnEvent.POLL_POOL_DOWN;
 }
 
 // Fetched once at boot by the config view. Static for the life of the process
