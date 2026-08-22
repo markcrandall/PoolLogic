@@ -49,6 +49,11 @@ class MockBackend:
         # Failure injection switches (driven by /api/mock/* routes)
         self.pool_link_up = True
         self.command_timeout = False
+        # Fails the heat POSTs only, leaving circuits working. The one command
+        # that writes twice is `mode` (spa circuit + courtesy heat), and its
+        # half-executed path — circuit lands, heat does not — is not reachable
+        # with command_timeout, which stalls everything at once.
+        self.fail_heat = False
         # Panel freeze protection. Real panels force circuits on themselves
         # when it engages; the mock just reports the flag so the client's
         # freeze handling can be exercised out of season.
@@ -220,7 +225,7 @@ class MockBackend:
         self._apply_later(lambda: self._circuits.__setitem__(name, bool(on)))
 
     async def heat_on(self, body, setpoint):
-        self._command_gate()
+        self._command_gate(heat=True)
 
         def apply():
             self._heat[body]["on"] = True
@@ -229,11 +234,11 @@ class MockBackend:
         self._apply_later(apply)
 
     async def heat_off(self, body):
-        self._command_gate()
+        self._command_gate(heat=True)
         self._apply_later(lambda: self._heat[body].__setitem__("on", False))
 
     async def set_setpoint(self, body, temp):
-        self._command_gate()
+        self._command_gate(heat=True)
         self._apply_later(lambda: self._heat[body].__setitem__("setpoint", temp))
 
     async def set_lights(self, show):
@@ -242,10 +247,15 @@ class MockBackend:
 
     # -- Internals --------------------------------------------------------
 
-    def _command_gate(self):
+    def _command_gate(self, heat=False):
         """Commands fail fast when the link is down; with command_timeout on,
-        they are accepted but never applied (client sees a confirm timeout)."""
+        they are accepted but never applied (client sees a confirm timeout).
+        fail_heat rejects the heat writes alone, so `mode` can land its circuit
+        and lose its courtesy heat — the asymmetry the other switches cannot
+        produce."""
         if not self.pool_link_up:
+            raise BackendUnavailable()
+        if heat and self.fail_heat:
             raise BackendUnavailable()
 
     def _apply_later(self, fn):

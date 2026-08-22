@@ -42,9 +42,19 @@ const TABLE = {
   },
 };
 
+// Exported for the DESIGN.md drift check in tests/design.doc.test.mjs, same as
+// CONNECTION_TABLE. A machine whose table nothing executes is a table nobody
+// notices going stale.
+export { TABLE as LOAD_TABLE };
+
 // Returns the SAME object reference when the event is ignored, so callers can
-// detect no-op transitions by identity — RETRY is only honored in FAILED, which
-// is what keeps a retry from racing a fetch that is still in flight.
+// detect no-op transitions by identity — RETRY is only honored in FAILED, so a
+// retry cannot restart a resource that already has an answer.
+//
+// Note what this does NOT do: LOADING means "no data yet", not "a fetch is in
+// flight", and nothing here tracks a request. A caller that re-fetches on a
+// cadence rather than only out of FAILED has to serialize its own requests —
+// views/config.js gives each resource a pollguard latch for exactly that.
 export function loadTransition(load, event, data = null) {
   const fn = TABLE[load.state]?.[event];
   if (!fn) {

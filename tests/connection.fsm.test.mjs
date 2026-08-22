@@ -1,5 +1,5 @@
 // Connection FSM tests. transition() is pure and total, so this needs no DOM,
-// no server and no dependencies: node --test tests/
+// no server and no dependencies: `node --test` from the repo root.
 //
 // Lives outside app/ deliberately — the bridge serves everything under app/,
 // and DEPLOY copies only app/ and bridge/ to the Pi.

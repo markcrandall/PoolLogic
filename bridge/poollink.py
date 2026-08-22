@@ -17,9 +17,14 @@ means exactly "was up, now down" — which is what `_ever_ok` was standing in fo
     (d) = force-disconnect on the way out
 
 The transition RETURNS the action rather than taking it. The only action is an
-async force-disconnect that must run under the backend's I/O lock, and close()
-already holds that lock — doing it inside the transition would be a self
-deadlock, because asyncio.Lock is not reentrant.
+async force-disconnect that must run under the backend's I/O lock, and a pure
+next-state function has no business acquiring one — it would make the block
+async, non-deterministic and untestable without an adapter. Taking it belongs to
+_dispatch, which is also the reason _dispatch must never be called while its
+caller already holds that lock: asyncio.Lock is not reentrant.
+
+The documented table above is checked against _TABLE by tests/test_poollink.py,
+along with DESIGN.md 3.1.
 """
 
 from enum import Enum
@@ -83,6 +88,12 @@ _TABLE = {
     # walk the link back to UP after the adapter's slot has been handed back.
     _S.CLOSED: {},
 }
+
+# Same role CONNECTION_TABLE plays for the client: tests/test_poollink.py reads
+# DESIGN.md 3.1 and asserts the documented table and this one describe the same
+# machine, in both directions. A table nobody executes is a table nobody
+# notices going stale.
+PUBLIC_TABLE = _TABLE
 
 
 def link_transition(state, event):

@@ -114,6 +114,72 @@ test("structured targets are confirmed by the control's own predicate", () => {
   assert.equal(store.getCommand("heater").state, CmdState.IDLE);
 });
 
+// --- A command that writes twice is confirmed on both writes ---------------
+// `mode` posts the spa circuit and then the courtesy heat. With no confirmed()
+// of its own it fell back to read(pool) === target, which watches the circuit
+// alone: a poll could confirm the circuit, move the command to IDLE, and leave
+// failIfCurrent with nothing to fail when the heat POST came back an error.
+// The switch reported success and the heat silently never happened — which is
+// the entire reason mode is one command and not two.
+// Reproduce the bridge side with POST /api/mock/fail_heat {"on": true}.
+const heat = (over) => ({
+  pool: { setpoint: 78, on: false, active: false },
+  spa: { setpoint: 101, on: false, active: false },
+  ...over,
+});
+
+test("entering spa stays PENDING until the courtesy heat lands too", () => {
+  reset();
+  store.dispatchCommand("mode", CmdEvent.TAP, "spa");
+
+  // Circuit landed, heat did not. Exactly what the mock produces with
+  // fail_heat on, and what a slow heat POST looks like at the 5s poll.
+  store.dispatchConn(ConnEvent.POLL_OK, withCircuit("spa", true));
+  assert.equal(
+    store.getCommand("mode").state,
+    CmdState.PENDING,
+    "half a two-write command is not a confirmed command"
+  );
+
+  store.dispatchConn(
+    ConnEvent.POLL_OK,
+    withCircuit("spa", true, {
+      heat: heat({ spa: { setpoint: 101, on: true, active: true } }),
+    })
+  );
+  assert.equal(store.getCommand("mode").state, CmdState.IDLE);
+});
+
+test("leaving spa stays PENDING until the heat is off too", () => {
+  reset();
+  store.dispatchCommand("mode", CmdEvent.TAP, "pool");
+
+  store.dispatchConn(
+    ConnEvent.POLL_OK,
+    withCircuit("spa", false, {
+      heat: heat({ spa: { setpoint: 101, on: true, active: true } }),
+    })
+  );
+  assert.equal(store.getCommand("mode").state, CmdState.PENDING);
+
+  store.dispatchConn(ConnEvent.POLL_OK, withCircuit("spa", false));
+  assert.equal(store.getCommand("mode").state, CmdState.IDLE);
+});
+
+test("a null spa setpoint confirms on the circuit alone", () => {
+  reset();
+  // send() skips the heat POST entirely when there is no setpoint to send, so
+  // waiting on heat here would hang the command until its 10s timeout.
+  store.dispatchCommand("mode", CmdEvent.TAP, "spa");
+  store.dispatchConn(
+    ConnEvent.POLL_OK,
+    withCircuit("spa", true, {
+      heat: heat({ spa: { setpoint: null, on: false, active: false } }),
+    })
+  );
+  assert.equal(store.getCommand("mode").state, CmdState.IDLE);
+});
+
 test("the register applies connection transitions and records the payload", () => {
   reset();
   const data = payload();

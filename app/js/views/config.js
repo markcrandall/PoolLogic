@@ -17,13 +17,20 @@
 import { ConnState } from "../fsm/connection.js";
 import { LoadState, LoadEvent, loading, loadTransition } from "../fsm/load.js";
 import { fetchConfig, fetchPanelInfo } from "../api.js";
+import { createPollGuard } from "../pollguard.js";
 import { STATUS } from "./panel.js";
 import { store } from "../state.js";
 
 // The state register for each resource: one place per resource that applies a
 // load transition, same rule the store follows for the connection FSM.
-const configRes = { load: loading };
-const panelRes = { load: loading };
+//
+// Each carries its own latch as well, because LOADING means "no data yet", not
+// "a fetch is in flight" — the load FSM has no in-flight state and its RETRY
+// guard only covers the config fetch. Same latch the state poll uses, for the
+// same reason: one request at a time, and a late answer that has been
+// superseded is dropped rather than written over a fresher one.
+const configRes = { load: loading, guard: createPollGuard() };
+const panelRes = { load: loading, guard: createPollGuard() };
 
 export function bindHandlers() {
   // Swap the pool controls out for the config view. Both live in index.html so
@@ -44,9 +51,9 @@ export function bindHandlers() {
 export function afterPoll() {
   // The circuit map is static and so is fetched once — but a failed fetch must
   // not be final, which is what it used to be. FAILED is the only state RETRY
-  // moves, and this is the only caller that can be in it, so a dropped fetch
-  // recovers on the next poll and no second fetch can stack behind one still
-  // in flight.
+  // moves, so a dropped fetch recovers on the next poll and a map already in
+  // hand is never re-requested. (Overlap is the latch's job, not this check's;
+  // see fetchInto.)
   if (configRes.load.state === LoadState.FAILED) {
     fetchInto(configRes, fetchConfig);
   }
@@ -54,11 +61,21 @@ export function afterPoll() {
 }
 
 function fetchInto(res, fetcher) {
+  // The latch, not the FSM, is what serializes this. The panel fetch runs on
+  // every poll regardless of state, and boot calls afterPoll twice in quick
+  // succession — bindHandlers directly, then again when the BOOTING poll
+  // resolves. Those two overlap whenever /api/panel outlives the state poll,
+  // and then whichever answers last wins, which can be the older of the two.
+  // (On localhost it never happens: panel answers in ~20ms against the poll's
+  // ~190ms. Over wifi to a Pi, where both are slow and variable, it can.)
+  const token = res.guard.begin();
+  if (token === null) return;
   // Ignored outside FAILED; dispatching it unconditionally is what lets the
   // panel fetch — which runs every poll — climb back out of a failure without
   // a second code path.
   res.load = loadTransition(res.load, LoadEvent.RETRY);
   fetcher().then((data) => {
+    if (!res.guard.settle(token)) return;
     res.load = loadTransition(
       res.load,
       data === null ? LoadEvent.FETCH_FAIL : LoadEvent.FETCH_OK,

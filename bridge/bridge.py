@@ -195,6 +195,7 @@ class MockControls:
         return [
             web.post("/api/mock/pool_link", self.pool_link),
             web.post("/api/mock/command_timeout", self.command_timeout),
+            web.post("/api/mock/fail_heat", self.fail_heat),
             web.post("/api/mock/freeze", self.freeze),
             web.post("/api/mock/alarm", self.alarm),
         ]
@@ -212,6 +213,17 @@ class MockControls:
             return bad_request('expected {"enabled": true|false}')
         self.backend.command_timeout = body["enabled"]
         return web.json_response({"commandTimeout": self.backend.command_timeout})
+
+    async def fail_heat(self, request):
+        """Reject the heat writes only. `mode` writes twice — spa circuit, then
+        courtesy heat — and this is the only switch that can fail the second
+        without the first, which is the case its confirmed() predicate exists
+        to catch."""
+        body = await read_json(request)
+        if body is None or not isinstance(body.get("on"), bool):
+            return bad_request('expected {"on": true|false}')
+        self.backend.fail_heat = body["on"]
+        return web.json_response({"failHeat": self.backend.fail_heat})
 
     async def freeze(self, request):
         body = await read_json(request)

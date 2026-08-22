@@ -21,6 +21,12 @@ import {
   CONNECTION_TABLE,
   transition,
 } from "../app/js/fsm/connection.js";
+import {
+  LoadState,
+  LoadEvent,
+  LOAD_TABLE,
+  loadTransition,
+} from "../app/js/fsm/load.js";
 
 const DESIGN = readFileSync(
   fileURLToPath(new URL("../DESIGN.md", import.meta.url)),
@@ -33,13 +39,13 @@ const DESIGN = readFileSync(
 //   | RECONNECTING | POLL_FAIL (count = 5) | OFFLINE | gave up |
 // A "/" pair is shorthand for two rows and is expanded; a "(count …)" suffix
 // picks which retryCount the row is claiming something about.
-function parseRows(section) {
+function parseRows(section, States) {
   const rows = [];
   for (const line of section.split("\n")) {
     const cells = line.split("|").map((c) => c.trim());
     if (cells.length < 5 || cells[0] !== "") continue; // not a table row
     const [, state, eventCell, nextCell] = cells;
-    if (!(state in ConnState)) continue; // header or separator
+    if (!(state in States)) continue; // header or separator
 
     const guard = /\(count\s*(<|=)\s*(\d+)\)/.exec(eventCell);
     // "count < 5" holds for any count below the cap; 1 exercises it.
@@ -63,13 +69,21 @@ function parseRows(section) {
   return rows;
 }
 
+function slice(from, to) {
+  const start = DESIGN.indexOf(from);
+  assert.notEqual(start, -1, `DESIGN.md no longer contains "${from}"`);
+  const end = DESIGN.indexOf(to, start);
+  assert.notEqual(end, -1, `DESIGN.md no longer contains "${to}" after "${from}"`);
+  return DESIGN.slice(start, end);
+}
+
+// --- 4.1 Connection FSM -----------------------------------------------------
 // The transition table only — 4.1 also carries a Moore output table, whose
 // rows are keyed on state too and would otherwise parse as transitions.
-const section = DESIGN.slice(
-  DESIGN.indexOf("### 4.1 Connection FSM"),
-  DESIGN.indexOf("Moore outputs:")
+const documented = parseRows(
+  slice("### 4.1 Connection FSM", "Moore outputs:"),
+  ConnState
 );
-const documented = parseRows(section);
 
 test("the documented table is parseable and complete", () => {
   assert.ok(documented.length >= 20, `only parsed ${documented.length} rows`);
@@ -110,6 +124,58 @@ test("the doc does not claim a transition the table has no row for", () => {
     assert.ok(
       CONNECTION_TABLE[state]?.[event],
       `DESIGN.md 4.1 documents ${state} + ${event}, which the code ignores`
+    );
+  }
+});
+
+// --- 4.3 Load FSM -----------------------------------------------------------
+// Same check, same reason. The load machine went undocumented for as long as it
+// existed, which is the state before drift, not an improvement on it: a table
+// nobody can read is not more trustworthy than one that has gone stale.
+const documentedLoad = parseRows(
+  slice("### 4.3 Load FSM", "Moore outputs:"),
+  LoadState
+);
+
+test("the documented load table is parseable and complete", () => {
+  assert.equal(documentedLoad.length, 5, `parsed ${documentedLoad.length} rows`);
+  for (const { state, event, next } of documentedLoad) {
+    assert.ok(state in LoadState, `unknown state ${state}`);
+    assert.ok(event in LoadEvent, `unknown event ${event}`);
+    assert.ok(next in LoadState, `unknown next state ${next}`);
+  }
+});
+
+test("every documented load row matches the code", () => {
+  for (const { state, event, next } of documentedLoad) {
+    const actual = loadTransition({ state, data: null }, event, {});
+    assert.equal(
+      actual.state,
+      next,
+      `DESIGN.md says ${state} + ${event} -> ${next}, code says ${actual.state}`
+    );
+  }
+});
+
+test("every implemented load transition is documented", () => {
+  const pairs = new Set(
+    documentedLoad.map(({ state, event }) => `${state}+${event}`)
+  );
+  for (const [state, row] of Object.entries(LOAD_TABLE)) {
+    for (const event of Object.keys(row)) {
+      assert.ok(
+        pairs.has(`${state}+${event}`),
+        `${state} + ${event} is implemented but missing from DESIGN.md 4.3`
+      );
+    }
+  }
+});
+
+test("the load doc does not claim a transition the table has no row for", () => {
+  for (const { state, event } of documentedLoad) {
+    assert.ok(
+      LOAD_TABLE[state]?.[event],
+      `DESIGN.md 4.3 documents ${state} + ${event}, which the code ignores`
     );
   }
 });

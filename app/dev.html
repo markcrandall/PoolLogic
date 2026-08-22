@@ -19,6 +19,10 @@
   <button onclick="post('/api/mock/pool_link', {up: true})">Restore pool link</button>
   <button onclick="post('/api/mock/command_timeout', {enabled: true})">Stall commands</button>
   <button onclick="post('/api/mock/command_timeout', {enabled: false})">Unstall commands</button>
+  <!-- Fails the heat writes only, so Spa lands its circuit and loses its
+       courtesy heat — the half-executed case "Stall commands" cannot make. -->
+  <button onclick="post('/api/mock/fail_heat', {on: true})">Fail heat commands only</button>
+  <button onclick="post('/api/mock/fail_heat', {on: false})">Allow heat commands</button>
   <button onclick="post('/api/mock/freeze', {on: true})">Freeze protection ON</button>
   <button onclick="post('/api/mock/freeze', {on: false})">Freeze protection OFF</button>
   <button onclick="post('/api/mock/alarm', {on: true})">Raise flow alarm</button>

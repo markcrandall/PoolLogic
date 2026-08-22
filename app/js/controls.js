@@ -37,6 +37,19 @@ export const CONTROLS = {
       }
       return postJson("api/heat/spa/off", {});
     },
+    // Two writes, so "done" has to mean both landed. Without this the default
+    // predicate (read(pool) === target) watched the circuit alone: a poll
+    // confirming the spa circuit could beat the heat POST, move the command to
+    // IDLE, and leave failIfCurrent with nothing to fail — the switch reported
+    // success while the courtesy heat, the whole reason this is one command,
+    // silently never happened. Mirrors send()'s own branches, including the
+    // one where a null setpoint means no heat POST was ever issued.
+    confirmed: (pool, target) => {
+      const entering = target === "spa";
+      if (pool.circuits.spa !== entering) return false;
+      if (entering && pool.heat.spa.setpoint == null) return true;
+      return pool.heat.spa.on === entering;
+    },
   },
   // Heater and setpoint targets carry the body captured at tap time, so a
   // mode change mid-flight can't redirect the command or its confirmation

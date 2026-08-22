@@ -13,9 +13,11 @@ import unittest
 from contextlib import redirect_stdout
 from pathlib import Path
 
-sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "bridge"))
+REPO = Path(__file__).resolve().parent.parent
+sys.path.insert(0, str(REPO / "bridge"))
 
 from poollink import (  # noqa: E402
+    PUBLIC_TABLE,
     RECONNECT_BACKOFF_MAX,
     RECONNECT_BACKOFF_START,
     LinkAction,
@@ -107,6 +109,97 @@ class TestExitActions(unittest.TestCase):
         ):
             _, action = quiet(link_transition, state, PoolLinkEvent.REFRESH_OK)
             self.assertIs(action, LinkAction.NONE)
+
+
+def _documented_rows():
+    """Parse the transition table in DESIGN.md 3.1.
+
+    Rows look like:
+        | UP | REFRESH_FAIL | DOWN | DISCONNECT | hand the socket back |
+    The Moore output table further down is keyed on state too, so the slice
+    stops before it — the same boundary tests/design.doc.test.mjs uses for 4.1.
+    """
+    design = (REPO / "DESIGN.md").read_text(encoding="utf-8")
+    start = design.index("### 3.1 Pool link FSM")
+    end = design.index("Moore outputs:", start)
+    rows = []
+    for line in design[start:end].split("\n"):
+        cells = [c.strip() for c in line.split("|")]
+        if len(cells) < 6 or cells[0] != "":
+            continue  # not a table row
+        state, event, nxt, action = cells[1:5]
+        if state not in PoolLinkState.__members__:
+            continue  # header or separator
+        rows.append(
+            (
+                PoolLinkState[state],
+                PoolLinkEvent[event],
+                PoolLinkState[nxt],
+                LinkAction[action],
+            )
+        )
+    return rows
+
+
+class TestDesignDocDrift(unittest.TestCase):
+    """DESIGN.md 3.1 and _TABLE must describe the same machine.
+
+    Both directions matter: a documented row the code does not implement is a
+    lie, and an implemented row the doc omits is a state nobody reviewing the
+    design will know exists. This machine went undocumented for as long as it
+    existed, which is not safer than drift — it is the state before drift.
+    """
+
+    def setUp(self):
+        self.documented = _documented_rows()
+
+    def test_the_documented_table_is_parseable(self):
+        # 3 live states x 3 events; CLOSED is terminal and has no rows.
+        self.assertEqual(len(self.documented), 9, self.documented)
+
+    def test_every_documented_row_matches_the_code(self):
+        for state, event, nxt, action in self.documented:
+            actual_next, actual_action = link_transition(state, event)
+            self.assertIs(
+                actual_next,
+                nxt,
+                f"DESIGN.md 3.1 says {state.value} + {event.value} -> "
+                f"{nxt.value}, code says {actual_next.value}",
+            )
+            self.assertIs(
+                actual_action,
+                action,
+                f"DESIGN.md 3.1 says {state.value} + {event.value} takes "
+                f"{action.value}, code takes {actual_action.value}",
+            )
+
+    def test_every_implemented_transition_is_documented(self):
+        pairs = {(state, event) for state, event, _, _ in self.documented}
+        for state, row in PUBLIC_TABLE.items():
+            for event in row:
+                self.assertIn(
+                    (state, event),
+                    pairs,
+                    f"{state.value} + {event.value} is implemented but missing "
+                    "from DESIGN.md 3.1",
+                )
+
+    def test_the_doc_claims_no_transition_the_table_lacks(self):
+        for state, event, _, _ in self.documented:
+            self.assertIn(
+                event,
+                PUBLIC_TABLE.get(state, {}),
+                f"DESIGN.md 3.1 documents {state.value} + {event.value}, "
+                "which the code ignores",
+            )
+
+    def test_closed_is_documented_as_terminal(self):
+        # Its emptiness is load-bearing, so it must not be parsed as "forgotten".
+        self.assertEqual(PUBLIC_TABLE[PoolLinkState.CLOSED], {})
+        self.assertNotIn(
+            PoolLinkState.CLOSED,
+            {state for state, _, _, _ in self.documented},
+        )
 
 
 class TestBackoffLadder(unittest.TestCase):

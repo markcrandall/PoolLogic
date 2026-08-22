@@ -145,6 +145,76 @@ heartbeat = OK, solid red = pool unreachable.
   (drop bridge, drop pool link, command timeout). The entire PWA is built and
   tested against mock before touching real equipment.
 
+### 3.1 Pool link FSM (`bridge/poollink.py`)
+
+The bridge runs the same three-block idiom as the client: `link_transition()` is
+the pure next-state block, `RealBackend._dispatch` is the register and the only
+writer, and `comStatus` / the status LED are the Moore outputs.
+
+States: `NEVER_CONNECTED, UP, DOWN, CLOSED`
+Events: `REFRESH_OK, REFRESH_FAIL, SHUTDOWN`
+
+```mermaid
+stateDiagram-v2
+    [*] --> NEVER_CONNECTED
+    NEVER_CONNECTED --> UP: REFRESH_OK
+    NEVER_CONNECTED --> NEVER_CONNECTED: REFRESH_FAIL / disconnect
+    UP --> UP: REFRESH_OK
+    UP --> DOWN: REFRESH_FAIL / disconnect
+    DOWN --> UP: REFRESH_OK
+    DOWN --> DOWN: REFRESH_FAIL / disconnect
+    NEVER_CONNECTED --> CLOSED: SHUTDOWN / disconnect
+    UP --> CLOSED: SHUTDOWN / disconnect
+    DOWN --> CLOSED: SHUTDOWN / disconnect
+```
+
+| State | Event | Next | Action | Notes |
+|---|---|---|---|---|
+| NEVER_CONNECTED | REFRESH_OK | UP | NONE | first contact since boot |
+| NEVER_CONNECTED | REFRESH_FAIL | NEVER_CONNECTED | DISCONNECT | self-loop: never reached the adapter, so never "dropped" |
+| NEVER_CONNECTED | SHUTDOWN | CLOSED | DISCONNECT | |
+| UP | REFRESH_OK | UP | NONE | |
+| UP | REFRESH_FAIL | DOWN | DISCONNECT | hand the socket back before reconnecting on top of it |
+| UP | SHUTDOWN | CLOSED | DISCONNECT | |
+| DOWN | REFRESH_OK | UP | NONE | recovered |
+| DOWN | REFRESH_FAIL | DOWN | DISCONNECT | |
+| DOWN | SHUTDOWN | CLOSED | DISCONNECT | |
+
+`CLOSED` is terminal and its row is deliberately empty: a refresh already in
+flight at shutdown must not walk the link back to UP after the adapter's
+connection slot has been handed back.
+
+`NEVER_CONNECTED` exists because `pool_up` was a bare boolean with four writers,
+and the state it could not express was re-derived independently in three places
+— `_pool_age()`'s `None`, `led.py`'s `_ever_ok` latch, and that latch again
+picking the LED's starting pattern. Three re-derivations of one unnamed state is
+a missing state. Because `NEVER_CONNECTED` self-loops on failure and can only
+leave on a success, `DOWN` now means exactly "was up, now down".
+
+The transition **returns** the disconnect action rather than taking it: the
+action is async and must run under the backend's I/O lock, which a pure function
+has no business acquiring. `_dispatch` is the only caller, and it must never be
+invoked while already holding that lock — `asyncio.Lock` is not reentrant.
+
+Moore outputs:
+
+| State | `comStatus` | Status LED (single) |
+|---|---|---|
+| NEVER_CONNECTED | pool_unreachable | rapid blink (0.15 s) |
+| UP | ok | heartbeat (0.12 s flash every 3 s) |
+| DOWN | pool_unreachable | steady blink (1 s cycle) |
+| CLOSED | — (bridge stopped) | dark |
+
+The reconnect backoff ladder (5, 10, 20, 40, 60 s) is deliberately **not** part
+of the machine. Only the run loop sleeps on it and only the run loop's own
+attempts should advance it; as shared state the post-command refresh could
+double it while the run loop was asleep, and the number would stop meaning
+"consecutive failed reconnect attempts".
+
+`tests/test_poollink.py` asserts the table above against `poollink.PUBLIC_TABLE`
+in both directions, the same drift check `tests/design.doc.test.mjs` runs on the
+client machines.
+
 ### API contract
 
 ```
@@ -171,10 +241,15 @@ POST /api/lights                {"show": "white" | "caribbean" | "party"}
 `{name}` ∈ spa, jets, cleaner, spillway, poolLight, spaLight.
 `{body}` ∈ pool, spa. Unknown names → 404. Out-of-bounds temp → 400.
 
-Mock-only: `POST /api/mock/freeze {"on": bool}` and
-`POST /api/mock/alarm {"on": bool}` alongside the existing `pool_link` and
-`command_timeout` injectors, so freeze handling and the alert path are testable
-without waiting on weather or a fault.
+Mock-only: `POST /api/mock/freeze {"on": bool}`, `POST /api/mock/alarm
+{"on": bool}` and `POST /api/mock/fail_heat {"on": bool}` alongside the existing
+`pool_link` and `command_timeout` injectors, so freeze handling and the alert
+path are testable without waiting on weather or a fault.
+
+`fail_heat` rejects the heat writes **only**, leaving circuits working.
+`command_timeout` stalls every command at once, which cannot reproduce the one
+case that matters for a command that writes twice: `mode` lands its spa circuit
+and loses its courtesy heat. See 4.2.
 
 `GET /api/config` and `GET /api/panel` serve the config page only (kept off
 `/api/state`, which every phone polls every 5s). `/api/panel` returns
@@ -449,6 +524,78 @@ mode (or their own) command is pending; UI notifies no longer reset the poll
 timer (only connection transitions do); command POSTs get 8s (vs 4s poll
 timeout) to survive the bridge's adapter-lock contention.
 
+**A command that writes twice must be confirmed on both writes.** `mode` posts
+the spa circuit and then the courtesy heat, but had no `confirmed()` predicate,
+so the default `read(pool) === target` watched the circuit alone. The heat POST
+gets 8 s and the poll interval is 5 s, so a poll could confirm the circuit, move
+the command to IDLE, and leave `failIfCurrent` with nothing to fail — the switch
+reported success while the heat silently never happened. `mode.confirmed()` now
+observes both writes, mirroring `send()`'s branches (including the null-setpoint
+case where no heat POST is issued at all). Reproduce with
+`POST /api/mock/fail_heat {"on": true}`.
+
+**Displayed value while PENDING.** The command carries its `target`, and the
+output block uses it: `mode` and `lightShow` show pending on the tapped side,
+and the setpoint shows the dialled number. `commitSetpointDraft` clears the
+draft *before* it taps, so without that middle rung the dial snapped back to the
+pool's old value for the whole PENDING window. Still Moore — the target is part
+of the command's committed state, not a clock read or an event.
+
+### 4.3 Load FSM (one instance per fetched resource)
+
+Used by the config view for `/api/config` and `/api/panel`. It exists because
+`null` was doing two jobs — "not here yet" and "the fetch failed" — so nothing
+could tell them apart and nothing could retry: one dropped `/api/config` at boot
+left the page reading "Loading circuit map…" until a manual reload, on a phone,
+at the equipment pad, on exactly the marginal wifi that caused it.
+
+States: `LOADING, LOADED, FAILED`
+Events: `FETCH_OK, FETCH_FAIL, RETRY`
+
+```mermaid
+stateDiagram-v2
+    [*] --> LOADING
+    LOADING --> LOADED: FETCH_OK
+    LOADING --> FAILED: FETCH_FAIL
+    LOADED --> LOADED: FETCH_OK
+    LOADED --> LOADED: FETCH_FAIL [keep last good data]
+    FAILED --> LOADING: RETRY
+```
+
+| State | Event | Next | Action / notes |
+|---|---|---|---|
+| LOADING | FETCH_OK | LOADED | data stored |
+| LOADING | FETCH_FAIL | FAILED | "Couldn't read X — retrying." |
+| LOADED | FETCH_OK | LOADED | fresh data replaces the old |
+| LOADED | FETCH_FAIL | LOADED | keep the last good data; returns the SAME object |
+| FAILED | RETRY | LOADING | the frozen `loading` singleton |
+
+Moore outputs: each table renders independently and says which unknown it is
+looking at — `pendingNote()` reads "Reading X…" in LOADING and "Couldn't read
+X — retrying." in FAILED. A failed `/api/config` no longer takes the panel's own
+tables down with it, and the panel's list is precisely what is useful at the pad
+when the map is unavailable.
+
+`LOADED | FETCH_FAIL` is listed rather than left to the default so it reads as a
+decision: blanking a page someone is standing at the equipment pad reading,
+because one poll's fetch dropped, is worse than showing data one cycle old.
+`RETRY` is honored **only** in FAILED, which is what lets `views/config.js`
+dispatch it unconditionally on every poll — the panel fetch climbs back out of a
+failure with no second code path, and a resource that already has an answer is
+never reset.
+
+**LOADING means "no data yet", not "a fetch is in flight."** The machine tracks
+no request, so serializing them is the caller's job: `views/config.js` gives each
+resource its own `createPollGuard()` latch — the same one the state poll uses.
+Boot calls `afterPoll` twice in quick succession (`bindHandlers` directly, then
+again when the BOOTING poll resolves), so before the latch those two `/api/panel`
+requests overlapped whenever the panel fetch outlived the state poll, and the
+older answer could land last and overwrite the newer. Measured on localhost the
+two miss each other comfortably — panel answers in ~20 ms against the poll's
+~190 ms — so this is a latency-dependent race, not one reproducible on the dev
+box; over wifi to a Pi, where both legs are slow and variable, it is live. The
+latch removes it as a possibility rather than leaving it to timing.
+
 ---
 
 ## 5. PWA (`app/`)
@@ -481,25 +628,50 @@ add-to-home-screen; **no service worker** (see §1).
 ```
 PoolLogic/
 ├── DESIGN.md
+├── README.md
 ├── app/
 │   ├── index.html
+│   ├── dev.html                # failure-injection console for --mock
 │   ├── manifest.json
 │   ├── icons/icon-192.png, icon-512.png
 │   ├── css/styles.css
 │   └── js/
-│       ├── app.js              # boot, poll scheduler, visibility handling
+│       ├── app.js              # boot, poll executor, visibility handling
 │       ├── state.js            # store = state register (SimpleShoppingList idiom)
 │       ├── api.js              # fetch wrappers → events, never state
+│       ├── schedule.js         # Moore output: connection state → timer plan (pure)
+│       ├── pollguard.js        # one request in flight; late answers dropped
+│       ├── controls.js         # per-control read/send/confirmed registry
+│       ├── commands.js         # POSTs + per-command timers; dispatches events
 │       ├── fsm/
 │       │   ├── connection.js   # table + transition() (pure)
-│       │   └── command.js      # per-control machines (pure)
-│       └── views/panel.js      # Moore output logic: render(state)
-└── bridge/
-    ├── bridge.py
-    ├── mock.py
-    ├── config.json
-    └── requirements.txt        # screenlogicpy, aiohttp
+│       │   ├── command.js      # per-control machines (pure)
+│       │   └── load.js         # per-resource fetch machines (pure)
+│       └── views/
+│           ├── panel.js        # Moore output logic: render(state)
+│           └── config.js       # /?config — circuit-map verification page
+├── bridge/
+│   ├── bridge.py               # aiohttp app, API, origin guards, config load
+│   ├── real.py                 # screenlogicpy backend
+│   ├── mock.py                 # simulated pool + failure injection
+│   ├── poollink.py             # pool link FSM (pure) — see 3.1
+│   ├── led.py                  # Moore output: link state → LED pattern
+│   ├── protocol.py             # comStatus wire values (client copy in fsm/connection.js)
+│   ├── errors.py               # BackendUnavailable
+│   ├── watch_circuits.py, watch_delays.py, discover_direct.py, inspect_data.py
+│   ├── config.json             # shipped defaults (config.local.json overrides, git-ignored)
+│   └── requirements.txt        # screenlogicpy, aiohttp
+├── installer/                  # install.sh, poollogic-update
+└── tests/                      # node --test ; python -m unittest discover -s tests  (from the repo root)
+    ├── connection.fsm.test.mjs, command.fsm.test.mjs, load.fsm.test.mjs
+    ├── schedule.test.mjs       # timer plan + poll guard
+    ├── store.test.mjs          # the state register's two real-world rules
+    ├── design.doc.test.mjs     # 4.1 / 4.3 drift check against the code
+    └── test_poollink.py        # link FSM + 3.1 drift check
 ```
+
+`tests/` sits outside `app/` and `bridge/` deliberately: the bridge serves
+everything under `app/`, and DEPLOY copies only `app/` and `bridge/` to the Pi.
 
 ---
 
@@ -524,5 +696,19 @@ PoolLogic/
    config separated from shipped defaults so updates stop colliding; the
    read-only circuit map at `/?config` for verifying `circuitIds` against the
    panel from a phone at the equipment pad.
+7. **M7 — FSM audit**: a pass over all four machines against the aic-lab idiom,
+   looking for the seams between them rather than faults inside them. Two real
+   defects: `mode` writes twice but confirmed on one of the writes, so a poll
+   could confirm the spa circuit and let a failed courtesy-heat POST vanish
+   (4.2); and the setpoint reverted to the pool's old value for the whole
+   PENDING window because the output block ignored the target its own state
+   carried. Closed a latency-dependent race where the config page's two boot
+   calls to `/api/panel` could overlap and land out of order, by giving each
+   resource the same `pollguard` latch the state poll uses. Extended the
+   anti-drift discipline from one machine to all four: the load FSM got a test
+   file, the load and pool-link machines got documented tables (3.1, 4.3), and
+   both are now executed against the code in the same both-directions check
+   `design.doc.test.mjs` already ran on 4.1. Added `/api/mock/fail_heat`,
+   without which the two-write failure could not be reproduced off the pool.
 
 Each milestone is independently demonstrable; M1–M3 require no pool access.

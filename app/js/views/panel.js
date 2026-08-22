@@ -172,8 +172,15 @@ function renderControls(pool, commands, setpointDraft, live) {
     pending: pending("heater"),
     enabled: usable && !pending("heater") && !pending("mode"),
   });
+  // Draft first (still being dialed), then the in-flight target, then the
+  // pool's truth. The middle rung matters: commitSetpointDraft clears the draft
+  // before it taps, so without it the dial snapped back to the old value for
+  // the whole PENDING window — while mode and lightShow below both show theirs.
+  // Still pure Moore; the target is part of the command's committed state.
   const shownSetpoint =
-    setpointDraft ?? (usable ? CONTROLS.setpoint.read(pool) : null);
+    setpointDraft ??
+    (pending("setpoint") ? cmd("setpoint").target?.temp : null) ??
+    (usable ? CONTROLS.setpoint.read(pool) : null);
   document.getElementById("setpoint-value").textContent =
     shownSetpoint != null ? `${shownSetpoint}°` : "—°";
   const setpointEl = document.getElementById("setpoint-value");
