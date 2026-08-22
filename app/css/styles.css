@@ -83,6 +83,36 @@ body {
   opacity: 0.9;
 }
 
+/* Same shape as the freeze banner — both say "equipment is running that you
+   did not turn on from here" — but amber, not the freeze blue: this one is
+   costing money rather than protecting the pipes, and it carries an action. */
+.pool-heat-banner {
+  display: none;
+  align-items: center;
+  justify-content: center;
+  gap: 0.75rem;
+  flex-wrap: wrap;
+  padding: 0.6rem 1rem;
+  background: var(--amber);
+  color: #fff;
+  font-weight: 600;
+  text-align: center;
+  line-height: 1.35;
+}
+.pool-heat-banner.visible { display: flex; }
+.pool-heat-off {
+  padding: 0.4rem 1rem;
+  font-size: 0.95rem;
+  font-weight: 600;
+  color: var(--text);
+  background: #fff;
+  border: none;
+  border-radius: 8px;
+  white-space: nowrap;
+}
+.pool-heat-off:disabled { opacity: 0.55; }
+.pool-heat-off.pending { opacity: 0.55; }
+
 .reconnect-btn {
   display: block;
   margin: 0.75rem auto;

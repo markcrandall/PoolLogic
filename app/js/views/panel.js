@@ -3,12 +3,11 @@
 
 import { ConnState, ConnEvent, MAX_ATTEMPTS } from "../fsm/connection.js";
 import { CmdState } from "../fsm/command.js";
-import {
-  activeBody,
-  CONTROLS,
-  SETPOINT_MIN,
-  SETPOINT_MAX,
-} from "../controls.js";
+import { LoadState } from "../fsm/load.js";
+import { CONTROLS } from "../controls.js";
+import { policy } from "../viewmode.js";
+import { createResource } from "../resource.js";
+import { fetchConfig } from "../api.js";
 import { store } from "../state.js";
 import {
   tapControl,
@@ -16,6 +15,17 @@ import {
   slideSetpoint,
   commitSetpointDraft,
 } from "../commands.js";
+
+// The bridge enforces its own setpoint bounds and config.local.json can
+// override them, so ask rather than compile a copy in. Static for the life of
+// the process — the bridge only re-reads config.json on restart — so this is
+// fetched once and only re-asked after a failure. setLimits notifies, which
+// re-renders; there is nothing else to do on arrival.
+const configRes = createResource(fetchConfig, (load) => {
+  if (load.state === LoadState.LOADED) {
+    store.setLimits(load.data.setpointMin, load.data.setpointMax);
+  }
+});
 
 // Moore output for the connection FSM. Exported because the config view shows
 // the same header dot, and a second copy of these colours (it had one, as a
@@ -54,8 +64,14 @@ const FREEZE_CONFIRM =
   "pipes. Turning it off in freezing weather can let them freeze and " +
   "burst.\n\nTurn it off anyway?";
 
+// Called by the scheduler after each poll, so this view never owns a timer.
+// Only re-asks after a failure; the bounds are static once they land.
+export function afterPoll() {
+  configRes.retryIfFailed();
+}
+
 export function render(state) {
-  const { conn, pool, lastUpdated, commands, setpointDraft } = state;
+  const { conn, pool, lastUpdated, commands, setpointDraft, limits } = state;
   const status = STATUS[conn.state];
   const live = conn.state === ConnState.ONLINE;
 
@@ -83,8 +99,24 @@ export function render(state) {
     : "";
   freezeBanner.classList.toggle("visible", freeze);
 
+  // The spa-only view hides the heater controls while the spa is off, which
+  // would also hide a pool heater lit from /?pool or at the panel itself —
+  // this release's own failure mode, made invisible. Gated on `live` for the
+  // same reason the freeze banner is: a stale snapshot must not claim the pool
+  // is (or isn't) heating. Mutually exclusive with the heater section by
+  // construction, since warnPoolHeat requires the spa circuit to be off.
+  const warnPoolHeat = live && policy().warnPoolHeat(pool);
+  const poolHeatBanner = document.getElementById("pool-heat-banner");
+  poolHeatBanner.classList.toggle("visible", warnPoolHeat);
+  const poolHeatOff = document.getElementById("btn-pool-heat-off");
+  const poolHeatPending =
+    (commands.heater?.state === CmdState.PENDING) &&
+    commands.heater?.target?.body === "pool";
+  poolHeatOff.classList.toggle("pending", poolHeatPending);
+  poolHeatOff.disabled = poolHeatPending;
+
   renderTemps(pool, lastUpdated, live, conn.state);
-  renderControls(pool, commands, setpointDraft, live);
+  renderControls(pool, commands, setpointDraft, live, limits);
   renderToast(commands);
 }
 
@@ -140,11 +172,14 @@ function formatAge(seconds) {
   return `${days} day${days === 1 ? "" : "s"} ago`;
 }
 
-function renderControls(pool, commands, setpointDraft, live) {
+function renderControls(pool, commands, setpointDraft, live, limits) {
   document.getElementById("controls").classList.toggle("disabled", !live);
   const usable = live && pool;
   const cmd = (id) => commands[id] ?? { state: CmdState.IDLE };
   const pending = (id) => cmd(id).state === CmdState.PENDING;
+  // One resolver, so the heater section, its label, the stepper and
+  // commitSetpointDraft cannot disagree about which body is being heated.
+  const body = policy().body(pool);
 
   // Mode switch — displayed value is the pool's truth; pending shows on the
   // tapped (target) side.
@@ -161,11 +196,19 @@ function renderControls(pool, commands, setpointDraft, live) {
     enabled: usable && !pending("mode"),
   });
 
-  // Heater toggle + setpoint stepper (active body). Both are locked while a
-  // mode change is pending (the active body is about to flip) and the
-  // stepper/slider also lock while their own command is pending, so
-  // follow-up edits can't be silently swallowed by the TAP-in-PENDING no-op.
-  const heaterOn = usable ? CONTROLS.heater.read(pool) : false;
+  // Heater toggle + setpoint stepper. Both are locked while a mode change is
+  // pending (the active body is about to flip) and the stepper/slider also lock
+  // while their own command is pending, so follow-up edits can't be silently
+  // swallowed by the TAP-in-PENDING no-op.
+  //
+  // On the spa-only view the whole section is hidden until the spa circuit is
+  // on, which is what makes the pool body unreachable from there: there is no
+  // control to tap from the resting state. Always shown on /?pool.
+  document
+    .getElementById("heater-section")
+    .classList.toggle("hidden", !policy().showHeater(pool));
+
+  const heaterOn = usable ? CONTROLS.heater.read(pool, body) : false;
   setButton("btn-heater", {
     text: heaterOn ? "On" : "Off",
     on: heaterOn,
@@ -180,7 +223,7 @@ function renderControls(pool, commands, setpointDraft, live) {
   const shownSetpoint =
     setpointDraft ??
     (pending("setpoint") ? cmd("setpoint").target?.temp : null) ??
-    (usable ? CONTROLS.setpoint.read(pool) : null);
+    (usable ? CONTROLS.setpoint.read(pool, body) : null);
   document.getElementById("setpoint-value").textContent =
     shownSetpoint != null ? `${shownSetpoint}°` : "—°";
   const setpointEl = document.getElementById("setpoint-value");
@@ -190,14 +233,19 @@ function renderControls(pool, commands, setpointDraft, live) {
   for (const id of ["btn-step-down", "btn-step-up"]) {
     document.getElementById(id).disabled = setpointLocked;
   }
+  // Bounds are rendered, not set once at bind time: they start at the shipped
+  // fallback and are replaced when /api/config lands, so a value applied at
+  // bind time would be whatever we guessed rather than what the bridge accepts.
   const slider = document.getElementById("setpoint-slider");
+  slider.min = limits.min;
+  slider.max = limits.max;
+  document.getElementById("slider-min").textContent = `${limits.min}°`;
+  document.getElementById("slider-max").textContent = `${limits.max}°`;
   slider.disabled = setpointLocked;
   if (shownSetpoint != null && !sliderActive) {
     slider.value = shownSetpoint;
   }
-  document.getElementById("heater-body").textContent = usable
-    ? activeBody(pool)
-    : "";
+  document.getElementById("heater-body").textContent = usable ? body : "";
 
   // Simple circuit toggles
   for (const id of TOGGLES) {
@@ -254,11 +302,19 @@ export function bindHandlers() {
 
   on("reconnect-btn", () => store.dispatchConn(ConnEvent.RECONNECT_TAPPED));
 
+  // Ask the bridge for the bounds it actually enforces. Fetched once; render
+  // shows the fallback until it lands, and afterPoll re-asks only on failure.
+  configRes.fetch();
+
+  // The one place the spa-only view names the pool body, and it is safe by
+  // direction: the policy pins ACTIVATION to the spa, while this only ever
+  // sends on:false. Reuses the heater command instance rather than adding a
+  // control — the banner and the heater section are mutually exclusive, since
+  // one needs the spa circuit on and the other needs it off. No freeze guard,
+  // matching btn-heater: freeze protection is about circulation, not heat.
+  on("btn-pool-heat-off", () => tapControl("heater", { body: "pool", on: false }));
+
   const slider = document.getElementById("setpoint-slider");
-  slider.min = SETPOINT_MIN;
-  slider.max = SETPOINT_MAX;
-  document.getElementById("slider-min").textContent = `${SETPOINT_MIN}°`;
-  document.getElementById("slider-max").textContent = `${SETPOINT_MAX}°`;
   slider.addEventListener("pointerdown", () => (sliderActive = true));
   slider.addEventListener("input", () => slideSetpoint(Number(slider.value)));
   slider.addEventListener("change", () => {
@@ -282,7 +338,7 @@ export function bindHandlers() {
   on("btn-heater", () => {
     const pool = store.getState().pool;
     if (!pool) return;
-    const body = activeBody(pool);
+    const body = policy().body(pool);
     tapControl("heater", { body, on: !pool.heat[body].on });
   });
   on("btn-step-down", () => stepSetpoint(-1));

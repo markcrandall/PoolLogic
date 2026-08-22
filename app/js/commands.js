@@ -3,12 +3,8 @@
 // touches the DOM.
 
 import { store } from "./state.js";
-import {
-  CONTROLS,
-  SETPOINT_MIN,
-  SETPOINT_MAX,
-  activeBody,
-} from "./controls.js";
+import { CONTROLS } from "./controls.js";
+import { policy } from "./viewmode.js";
 import {
   CmdState,
   CmdEvent,
@@ -54,13 +50,19 @@ function failIfCurrent(id, since, event) {
 // sends once after the taps pause; the slider sends on release.
 let stepperTimer = null;
 
+// Clamped to what the bridge will actually accept, which /api/config reports
+// and config.local.json can override — not to a constant compiled in here.
+const clamp = (value) => {
+  const { min, max } = store.getState().limits;
+  return Math.max(min, Math.min(max, value));
+};
+
 export function stepSetpoint(delta) {
   const { conn, pool, setpointDraft } = store.getState();
   if (conn.state !== ConnState.ONLINE || !pool) return;
 
-  const base = setpointDraft ?? CONTROLS.setpoint.read(pool);
-  const draft = Math.max(SETPOINT_MIN, Math.min(SETPOINT_MAX, base + delta));
-  store.setSetpointDraft(draft);
+  const base = setpointDraft ?? CONTROLS.setpoint.read(pool, policy().body(pool));
+  store.setSetpointDraft(clamp(base + delta));
 
   clearTimeout(stepperTimer);
   stepperTimer = setTimeout(commitSetpointDraft, STEP_DEBOUNCE_MS);
@@ -70,9 +72,7 @@ export function slideSetpoint(value) {
   const { conn, pool } = store.getState();
   if (conn.state !== ConnState.ONLINE || !pool) return;
   clearTimeout(stepperTimer);
-  store.setSetpointDraft(
-    Math.max(SETPOINT_MIN, Math.min(SETPOINT_MAX, value))
-  );
+  store.setSetpointDraft(clamp(value));
 }
 
 export function commitSetpointDraft() {
@@ -80,7 +80,8 @@ export function commitSetpointDraft() {
   const { pool, setpointDraft } = store.getState();
   store.setSetpointDraft(null);
   if (!pool || setpointDraft == null) return;
-  const body = activeBody(pool);
+  // One resolver decides the body; on the spa-only view this is always "spa".
+  const body = policy().body(pool);
   if (setpointDraft !== pool.heat[body].setpoint) {
     tapControl("setpoint", { body, temp: setpointDraft });
   }

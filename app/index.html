@@ -18,6 +18,12 @@
 
   <div id="status-banner" class="status-banner"></div>
   <div id="freeze-banner" class="freeze-banner" role="status"></div>
+  <!-- Spa-only view: a pool heater lit elsewhere would otherwise be invisible
+       here, since that view hides the heater controls entirely. -->
+  <div id="pool-heat-banner" class="pool-heat-banner" role="status">
+    <span>The pool heater is running — heating the whole pool.</span>
+    <button id="btn-pool-heat-off" class="pool-heat-off">Turn it off</button>
+  </div>
   <button id="reconnect-btn" class="reconnect-btn hidden">Reconnect</button>
 
   <section id="temps" class="temps">
@@ -35,20 +41,24 @@
         <button id="btn-mode-spa" class="mode-btn" disabled>Spa</button>
       </div>
     </div>
-    <div class="control-row">
-      <span class="control-label">Heater <small id="heater-body" class="heater-body"></small></span>
-      <button id="btn-heater" class="toggle-btn" disabled>Off</button>
-      <div class="stepper">
-        <button id="btn-step-down" class="step-btn" disabled>−</button>
-        <span id="setpoint-value" class="setpoint">—°</span>
-        <button id="btn-step-up" class="step-btn" disabled>+</button>
+    <!-- One wrapper so the spa-only view can hide the heater with a single
+         toggle; on /?pool it is always shown. -->
+    <div id="heater-section">
+      <div class="control-row">
+        <span class="control-label">Heater <small id="heater-body" class="heater-body"></small></span>
+        <button id="btn-heater" class="toggle-btn" disabled>Off</button>
+        <div class="stepper">
+          <button id="btn-step-down" class="step-btn" disabled>−</button>
+          <span id="setpoint-value" class="setpoint">—°</span>
+          <button id="btn-step-up" class="step-btn" disabled>+</button>
+        </div>
       </div>
-    </div>
-    <div class="control-row slider-row">
-      <span class="slider-bound" id="slider-min"></span>
-      <input type="range" id="setpoint-slider" step="1" disabled
-             aria-label="heater setpoint">
-      <span class="slider-bound" id="slider-max"></span>
+      <div class="control-row slider-row">
+        <span class="slider-bound" id="slider-min"></span>
+        <input type="range" id="setpoint-slider" step="1" disabled
+               aria-label="heater setpoint">
+        <span class="slider-bound" id="slider-max"></span>
+      </div>
     </div>
     <div class="control-row"><span class="control-label">Jets</span><button id="btn-jets" class="toggle-btn" disabled>Off</button></div>
     <div class="control-row"><span class="control-label">Cleaner</span><button id="btn-cleaner" class="toggle-btn" disabled>Off</button></div>
@@ -116,12 +126,14 @@
     <dl id="panel-equipment" class="config-dl"></dl>
     <p id="equipment-note" class="config-note"></p>
 
-    <a class="config-back" href="./">← back to controls</a>
+    <!-- The full panel, not the spa-only default: verifying circuit IDs at the
+         pad means toggling circuits. -->
+    <a class="config-back" href="./?pool">← back to controls</a>
   </section>
 
   <div id="toast" class="toast">Command failed — the pool didn't respond</div>
 
-  <div class="app-version">M7</div>
+  <div class="app-version">M8</div>
   <script type="module" src="js/app.js"></script>
 </body>
 </html>

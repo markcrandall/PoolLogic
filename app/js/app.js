@@ -11,14 +11,23 @@ import { fetchState } from "./api.js";
 import { ConnState, ConnEvent } from "./fsm/connection.js";
 import { nextSchedule } from "./schedule.js";
 import { createPollGuard } from "./pollguard.js";
+import { ViewMode, resolveMode, setViewMode } from "./viewmode.js";
 import * as panelView from "./views/panel.js";
 import * as configView from "./views/config.js";
 
-// /?config swaps in the read-only circuit map. Same store, same poll loop —
-// only the output logic differs, so connection handling stays in one place.
-const view = new URLSearchParams(location.search).has("config")
-  ? configView
-  : panelView;
+// Three URLs, one store and one poll loop — only the output logic differs, so
+// connection handling stays in one place.
+//
+//   /         spa-only heating (default): the pool body cannot be heated
+//   /?pool    the full panel, pool heater included
+//   /?config  the read-only circuit map
+//
+// Resolved here, before anything renders, because this is the only module that
+// should be reading `location` — which is what keeps the policy in viewmode.js
+// pure and testable in node.
+const mode = resolveMode(location.search);
+setViewMode(mode);
+const view = mode === ViewMode.CONFIG ? configView : panelView;
 const { render, bindHandlers } = view;
 
 // One timer, always cleared before a new one is armed (see schedule), so a

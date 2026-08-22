@@ -3,12 +3,14 @@
 
 import { postJson } from "./api.js";
 
-// Mirrors bridge/config.json setpoint bounds.
+// The bounds used until /api/config answers with the ones the bridge actually
+// enforces (see state.js `limits`). Not a mirror anyone has to keep in step:
+// config.local.json on the Pi can override setpointMax, and the bridge rejects
+// out-of-range values with a 400, so a hand-copied cap here would drift into
+// either a stepper that stops short or a command that dies as an unexplained
+// FAILED toast.
 export const SETPOINT_MIN = 40;
 export const SETPOINT_MAX = 102;
-
-export const activeBody = (pool) => (pool?.circuits?.spa ? "spa" : "pool");
-const activeHeat = (pool) => pool.heat[activeBody(pool)];
 
 const circuit = (id) => ({
   id,
@@ -54,9 +56,17 @@ export const CONTROLS = {
   // Heater and setpoint targets carry the body captured at tap time, so a
   // mode change mid-flight can't redirect the command or its confirmation
   // to the other body.
+  //
+  // read() takes that body as a REQUIRED parameter — deliberately no default.
+  // These used to derive it themselves via activeBody(pool), which resolved to
+  // "pool" whenever the spa circuit was off and is how the app came to offer
+  // pool heating from its resting state. A caller that forgets the argument now
+  // hits pool.heat[undefined] and throws into render()'s try/catch, which is
+  // loud; defaulting would put the silent pool fallback straight back.
+  // viewmode.js owns the decision now.
   heater: {
     id: "heater",
-    read: (pool) => activeHeat(pool).on,
+    read: (pool, body) => pool.heat[body].on,
     send: (target, pool) => {
       if (!target.on) return postJson(`api/heat/${target.body}/off`, {});
       const setpoint = pool.heat[target.body].setpoint;
@@ -67,7 +77,7 @@ export const CONTROLS = {
   },
   setpoint: {
     id: "setpoint",
-    read: (pool) => activeHeat(pool).setpoint,
+    read: (pool, body) => pool.heat[body].setpoint,
     send: (target) =>
       postJson(`api/heat/${target.body}/setpoint`, { temp: target.temp }),
     confirmed: (pool, target) => pool.heat[target.body].setpoint === target.temp,

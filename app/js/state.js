@@ -9,7 +9,7 @@ import {
   CmdState,
   CmdEvent,
 } from "./fsm/command.js";
-import { CONTROLS } from "./controls.js";
+import { CONTROLS, SETPOINT_MIN, SETPOINT_MAX } from "./controls.js";
 
 export const store = {
   _state: {
@@ -18,6 +18,10 @@ export const store = {
     lastUpdated: null,    // Date of last successful poll (ok or pool-down)
     commands: {},         // controlId -> command FSM instance
     setpointDraft: null,  // stepper value being edited, pre-send
+    // Setpoint bounds. Starts at the shipped fallback and is replaced once
+    // /api/config reports what the bridge actually enforces — which
+    // config.local.json on the Pi can override.
+    limits: { min: SETPOINT_MIN, max: SETPOINT_MAX },
   },
   _listeners: [],
 
@@ -59,6 +63,18 @@ export const store = {
 
   setSetpointDraft(value) {
     this._state.setpointDraft = value;
+    this._notify();
+  },
+
+  // Applied only when /api/config gives a usable pair; a malformed or partial
+  // payload leaves the shipped fallback in place rather than replacing a known
+  // bound with NaN, which would make Math.min/max silently pass anything.
+  setLimits(min, max) {
+    if (!Number.isFinite(min) || !Number.isFinite(max) || min >= max) {
+      console.warn(`ignoring unusable setpoint bounds ${min}-${max}`);
+      return;
+    }
+    this._state.limits = { min, max };
     this._notify();
   },
 

@@ -14,6 +14,7 @@ import assert from "node:assert/strict";
 import { store } from "../app/js/state.js";
 import { ConnState, ConnEvent } from "../app/js/fsm/connection.js";
 import { CmdState, CmdEvent } from "../app/js/fsm/command.js";
+import { SETPOINT_MIN, SETPOINT_MAX } from "../app/js/controls.js";
 
 // The store is a module singleton, so each test starts from a known register.
 function reset() {
@@ -23,6 +24,7 @@ function reset() {
   s.lastUpdated = null;
   s.commands = {};
   s.setpointDraft = null;
+  s.limits = { min: SETPOINT_MIN, max: SETPOINT_MAX };
 }
 
 const payload = (over = {}) => ({
@@ -166,6 +168,37 @@ test("leaving spa stays PENDING until the heat is off too", () => {
   assert.equal(store.getCommand("mode").state, CmdState.IDLE);
 });
 
+// Requirement: selecting Pool mode turns off any active spa heater. The
+// courtesy-heat command has always sent the heat-off, but nothing asserted the
+// leaving-spa direction end to end — only the entering direction was covered.
+test("leaving spa is not confirmed until the spa heat is actually off", () => {
+  reset();
+  store.dispatchConn(
+    ConnEvent.POLL_OK,
+    withCircuit("spa", true, {
+      heat: heat({ spa: { setpoint: 101, on: true, active: true } }),
+    })
+  );
+  store.dispatchCommand("mode", CmdEvent.TAP, "pool");
+
+  // Spa circuit off but the heater still reported on — the panel has not
+  // caught up, or the heat-off POST failed. Not done.
+  store.dispatchConn(
+    ConnEvent.POLL_OK,
+    withCircuit("spa", false, {
+      heat: heat({ spa: { setpoint: 101, on: true, active: true } }),
+    })
+  );
+  assert.equal(
+    store.getCommand("mode").state,
+    CmdState.PENDING,
+    "a spa heater still running means the mode change is not finished"
+  );
+
+  store.dispatchConn(ConnEvent.POLL_OK, withCircuit("spa", false));
+  assert.equal(store.getCommand("mode").state, CmdState.IDLE);
+});
+
 test("a null spa setpoint confirms on the circuit alone", () => {
   reset();
   // send() skips the heat POST entirely when there is no setpoint to send, so
@@ -192,6 +225,48 @@ test("the register applies connection transitions and records the payload", () =
   // A failed poll carries no payload; the last-known one must survive it, or
   // the temps would blank every time a single poll dropped.
   assert.equal(store.getState().pool, data);
+});
+
+// --- Setpoint bounds --------------------------------------------------------
+// The UI cap used to be a constant hand-copied from bridge/config.json. The
+// bridge enforces its own value with a 400 and config.local.json on the Pi can
+// override it, so the copy could drift into a stepper that stops short or a
+// command that dies as an unexplained FAILED toast.
+test("limits start at the shipped fallback and follow /api/config", () => {
+  reset();
+  assert.deepEqual(store.getState().limits, {
+    min: SETPOINT_MIN,
+    max: SETPOINT_MAX,
+  });
+
+  store.setLimits(40, 96);
+  assert.deepEqual(store.getState().limits, { min: 40, max: 96 });
+});
+
+test("an unusable bounds pair leaves the last good one in place", () => {
+  reset();
+  const quiet = console.warn;
+  console.warn = () => {};
+  try {
+    // NaN would make Math.min/Math.max pass anything through, so a malformed
+    // payload must not be allowed to replace a known bound.
+    for (const [min, max] of [
+      [undefined, 102],
+      [40, null],
+      [NaN, NaN],
+      [102, 40], // inverted
+      [80, 80], // empty range
+    ]) {
+      store.setLimits(min, max);
+      assert.deepEqual(
+        store.getState().limits,
+        { min: SETPOINT_MIN, max: SETPOINT_MAX },
+        `${min}-${max} must be refused`
+      );
+    }
+  } finally {
+    console.warn = quiet;
+  }
 });
 
 test("subscribers are notified on every dispatch", () => {

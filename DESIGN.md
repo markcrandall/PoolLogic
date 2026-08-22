@@ -57,7 +57,8 @@ icon and title on iOS/Android.
 | Pool / Spa mode | two-position switch | spa circuit on/off (panel handles valve interlock) |
 | Heater | On/Off toggle + setpoint stepper per active body | heat mode Off(0) / Heater(3); SetHeatPoint |
 | Spa auto-heat | selecting Spa mode also sends heater-on (spa setpoint); leaving Spa sends heater-off. App-owned so a mid-session Heater-Off sticks. REQUIRES disabling the panel's "Spa Manual Heat" setting (verified 2026-07-22: with it enabled the controller re-asserts heat ~15s after any off command while the spa circuit is on) | app-side, in the mode control's send |
-| Setpoint bounds | 40–102 °F, enforced bridge-side AND clamped in UI (lowered from 75 on 2026-07-22 to match the pool body's real setpoint range) | |
+| Setpoint bounds | 40–102 °F, enforced bridge-side; the UI clamp now **reads them from `/api/config`** rather than mirroring the number by hand, so a `config.local.json` override cannot desync the two (M8). Range lowered from 75 on 2026-07-22 to match the pool body's real setpoint range | |
+| Heater body | Spa only on `/` (the default); `/?pool` keeps both — see 5.1 for why the old shared view invited heating the pool by accident | one resolver in `viewmode.js` |
 | Jets | toggle | jets circuit |
 | Cleaner | toggle | cleaner circuit |
 | Spillway | toggle | spillway circuit |
@@ -623,6 +624,67 @@ tabs.
 Big touch targets (poolside, wet hands). Manifest + 192/512 icons for
 add-to-home-screen; **no service worker** (see §1).
 
+### 5.1 View modes (added 2026-08-22, M8)
+
+Three URLs, one store and one poll loop — only the output logic differs, so
+connection handling stays in one place.
+
+| URL | Mode | View |
+|---|---|---|
+| `/` | `SPA` | spa-only heating — the default |
+| `/?pool` | `POOL` | the full panel, pool heater included |
+| `/?config` | `CONFIG` | the read-only circuit map |
+
+`app/js/viewmode.js` resolves the mode (pure, from the query string) and owns
+the policy that follows from it:
+
+| | `SPA` | `POOL` |
+|---|---|---|
+| heater acts on body | always `"spa"` | spa if the spa circuit is on, else pool |
+| heater controls shown | only while the spa circuit is on | always |
+| "pool heater is running" banner | when the pool heater is on and the spa is off | never — it shows the control |
+
+**Why the default view cannot heat the pool.** The heater's body used to come
+from a free-floating `activeBody(pool)`, re-derived at four call sites, which
+resolved to `"pool"` whenever the spa circuit was off — the resting state. Open
+the app to warm the spa, tap **Heater** before switching Mode, and you started
+heating the entire pool to its 78° setpoint, with the word "pool" in small text
+beside the label as the only warning. The pool heater is not used here at all,
+so that was pure downside; and because Mode → Spa already starts the spa heater
+itself (the courtesy heat in §2), the button's one routine effect from the
+resting state was the accident.
+
+Two things fix it, and both matter. Hiding the controls removes the affordance;
+pinning the body means that even if something did reach the command, it cannot
+name the pool. `heater.read` and `setpoint.read` take the body as a **required**
+parameter for the same reason — a forgotten argument throws into `render`'s
+try/catch, where a default would have silently restored the pool fallback.
+
+`/?pool` keeps the pool heater, and therefore keeps the sharp edge, on purpose.
+It is the expert view; the protection is that nobody reaches it by accident.
+`manifest.json` has `"start_url": "./"`, so an installed home-screen icon opens
+the spa view.
+
+**The pool-heat banner.** Hiding the heater controls while the spa is off would
+also hide a pool heater lit from `/?pool` or at the panel itself — this
+release's own failure mode, made invisible. So the spa view surfaces it, in the
+same shape as the freeze banner, with a one-tap **Turn it off**. It reuses the
+`heater` command instance rather than adding a control: the banner and the
+heater section are mutually exclusive by construction, since one needs the spa
+circuit on and the other needs it off. This is the only place the spa view names
+the pool body, and it is safe by direction — the policy pins *activation* to the
+spa, while the banner only ever sends `on: false`.
+
+**Setpoint bounds come from `/api/config`.** They were a constant in
+`controls.js` hand-copied from `config.json`. The bridge enforces its own value
+with a 400 and `config.local.json` on the Pi can override it, so the copy could
+drift into a stepper that stops short of what is allowed, or one that lets you
+dial past it and dies as an unexplained FAILED toast. The shipped constant is
+now only the fallback used until the fetch lands; `store.limits` holds the live
+pair and the slider bounds are rendered from it rather than set once at bind
+time. A malformed payload is refused rather than allowed to install `NaN`,
+which would make the clamp pass anything.
+
 ### File layout
 
 ```
@@ -636,11 +698,13 @@ PoolLogic/
 │   ├── icons/icon-192.png, icon-512.png
 │   ├── css/styles.css
 │   └── js/
-│       ├── app.js              # boot, poll executor, visibility handling
+│       ├── app.js              # boot, routing, poll executor, visibility handling
 │       ├── state.js            # store = state register (SimpleShoppingList idiom)
 │       ├── api.js              # fetch wrappers → events, never state
+│       ├── viewmode.js         # URL → view + heater-body policy (pure) — see 5.1
 │       ├── schedule.js         # Moore output: connection state → timer plan (pure)
 │       ├── pollguard.js        # one request in flight; late answers dropped
+│       ├── resource.js         # one fetched resource: load FSM + the latch
 │       ├── controls.js         # per-control read/send/confirmed registry
 │       ├── commands.js         # POSTs + per-command timers; dispatches events
 │       ├── fsm/
@@ -664,6 +728,7 @@ PoolLogic/
 ├── installer/                  # install.sh, poollogic-update
 └── tests/                      # node --test ; python -m unittest discover -s tests  (from the repo root)
     ├── connection.fsm.test.mjs, command.fsm.test.mjs, load.fsm.test.mjs
+    ├── viewmode.test.mjs       # routing + "SPA mode never resolves the pool body"
     ├── schedule.test.mjs       # timer plan + poll guard
     ├── store.test.mjs          # the state register's two real-world rules
     ├── design.doc.test.mjs     # 4.1 / 4.3 drift check against the code
@@ -710,5 +775,18 @@ everything under `app/`, and DEPLOY copies only `app/` and `bridge/` to the Pi.
    both are now executed against the code in the same both-directions check
    `design.doc.test.mjs` already ran on 4.1. Added `/api/mock/fail_heat`,
    without which the two-write failure could not be reproduced off the pool.
+
+8. **M8 — the pool heater was one tap away**: the heater's body came from a
+   free-floating `activeBody(pool)` that resolved to `"pool"` whenever the spa
+   circuit was off — the resting state — so opening the app to warm the spa and
+   tapping Heater before switching Mode started heating the entire pool. The
+   pool heater is never used here, and Mode → Spa already starts the spa heater
+   itself, so that button's one routine effect from rest was the accident. The
+   default URL is now a spa-only view where the pool body is unreachable, the
+   full panel moved to `/?pool`, and the body decision — previously re-derived
+   at four call sites — lives in one resolver with a test that sweeps every
+   snapshot (5.1). A banner surfaces a pool heater lit elsewhere, which the new
+   view would otherwise hide. Setpoint bounds now come from `/api/config`
+   instead of a constant hand-copied from `config.json`.
 
 Each milestone is independently demonstrable; M1–M3 require no pool access.
