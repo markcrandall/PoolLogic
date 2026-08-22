@@ -104,10 +104,23 @@ export function render(state) {
   // this release's own failure mode, made invisible. Gated on `live` for the
   // same reason the freeze banner is: a stale snapshot must not claim the pool
   // is (or isn't) heating. Mutually exclusive with the heater section by
-  // construction, since warnPoolHeat requires the spa circuit to be off.
-  const warnPoolHeat = live && policy().warnPoolHeat(pool);
-  const poolHeatBanner = document.getElementById("pool-heat-banner");
-  poolHeatBanner.classList.toggle("visible", warnPoolHeat);
+  // construction, since the warning requires the spa circuit to be off.
+  //
+  // Two different facts, said differently. "on" is heat_mode != OFF, which is
+  // armed, not burning; calling that "running" is a false alarm on any pool
+  // whose heat mode is simply left set. Both still offer the off switch —
+  // armed means it fires the next time the pump runs.
+  const poolHeat = live ? policy().poolHeatWarning(pool) : null;
+  document.getElementById("pool-heat-text").textContent =
+    poolHeat === "running"
+      ? "The pool heater is running — heating the whole pool."
+      : poolHeat === "armed"
+        ? "The pool heater is switched on — it will heat the pool when the pump runs."
+        : "";
+  // `hidden`, not a class of this element's own: see index.html and styles.css.
+  document
+    .getElementById("pool-heat-banner")
+    .classList.toggle("hidden", poolHeat === null);
   const poolHeatOff = document.getElementById("btn-pool-heat-off");
   const poolHeatPending =
     (commands.heater?.state === CmdState.PENDING) &&

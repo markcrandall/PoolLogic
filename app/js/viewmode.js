@@ -41,12 +41,24 @@ const POLICY = Object.freeze({
     // A pool heater lit earlier, from /?pool, or at the panel itself would
     // otherwise be hidden here — this release's own failure mode, made
     // invisible. Surface it instead. See views/panel.js.
-    warnPoolHeat: (pool) => !!pool?.heat?.pool?.on && !pool?.circuits?.spa,
+    //
+    // Returns WHICH of the two, not a boolean, because they are different
+    // facts and saying the wrong one is a false alarm:
+    //   "running" — heat_state is not OFF: the heater is firing right now.
+    //   "armed"   — heat_mode is not OFF but it is not firing: nothing is
+    //               burning yet, but it will the next time the pump runs.
+    // `on` alone was read as "running", which is wrong on any pool whose heat
+    // mode is simply left set — a standing false alarm.
+    poolHeatWarning: (pool) => {
+      if (!pool || pool.circuits?.spa) return null;
+      if (pool.heat?.pool?.active) return "running";
+      return pool.heat?.pool?.on ? "armed" : null;
+    },
   }),
   [ViewMode.POOL]: Object.freeze({
     body: (pool) => (pool?.circuits?.spa ? "spa" : "pool"),
     showHeater: () => true,
-    warnPoolHeat: () => false, // this view shows the pool heater control itself
+    poolHeatWarning: () => null, // this view shows the pool heater control itself
   }),
 });
 

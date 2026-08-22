@@ -240,6 +240,26 @@ class MockControls:
         return web.json_response({"alarm": self.backend.alarm_injected})
 
 
+# "Cache it, but ask me before reusing it" — NOT "don't cache it", which is
+# no-store. aiohttp sends ETag and Last-Modified but no Cache-Control, and a
+# response with no Cache-Control gets *heuristic* freshness: browsers reuse it
+# for roughly 10% of its age since Last-Modified, without asking. A stylesheet
+# last edited a month ago is then served from disk for about three days.
+#
+# That is how a phone comes to run a new index.html against an old styles.css,
+# and it has already bitten once: the M8 pool-heat banner relied on a
+# display:none that the cached sheet did not have, so it announced a pool heater
+# that was off. The app is now defensive about that (see 5.1), but the mismatch
+# itself is the bug, and an update the family has to hard-reload is not an
+# update. With no-cache the browser still caches and still sends If-None-Match;
+# the bridge answers 304 in a couple hundred bytes when nothing changed, which
+# on a LAN is free next to the /api/state poll every phone runs every 5s.
+#
+# Applied uniformly, icons included: they change so rarely that the revalidation
+# costs nothing, and one rule is easier to reason about than a per-type table.
+CACHE_CONTROL = "no-cache"
+
+
 async def serve_app_file(request):
     tail = request.match_info.get("tail", "") or "index.html"
     target = (APP_DIR / tail).resolve()
@@ -248,7 +268,10 @@ async def serve_app_file(request):
     if not target.is_file():
         raise web.HTTPNotFound()
     ctype = mimetypes.guess_type(target.name)[0] or "application/octet-stream"
-    return web.FileResponse(target, headers={"Content-Type": ctype})
+    return web.FileResponse(
+        target,
+        headers={"Content-Type": ctype, "Cache-Control": CACHE_CONTROL},
+    )
 
 
 LOCAL_CONFIG_SUFFIX = ".local.json"

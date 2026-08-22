@@ -85,9 +85,13 @@ body {
 
 /* Same shape as the freeze banner — both say "equipment is running that you
    did not turn on from here" — but amber, not the freeze blue: this one is
-   costing money rather than protecting the pipes, and it carries an action. */
+   costing money rather than protecting the pipes, and it carries an action.
+   Visibility is the `hidden` class, NOT a display:none here: this rule is new
+   in M8, and a browser on a cached older stylesheet would not have it, which
+   showed the banner unconditionally. `.hidden` is old enough to be in any
+   cached copy. */
 .pool-heat-banner {
-  display: none;
+  display: flex;
   align-items: center;
   justify-content: center;
   gap: 0.75rem;
@@ -99,7 +103,6 @@ body {
   text-align: center;
   line-height: 1.35;
 }
-.pool-heat-banner.visible { display: flex; }
 .pool-heat-off {
   padding: 0.4rem 1rem;
   font-size: 0.95rem;

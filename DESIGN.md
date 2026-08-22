@@ -130,6 +130,17 @@ heartbeat = OK, solid red = pool unreachable.
   falls back to the time of the last successful poll — a different unknown,
   honestly labelled. Keeping both cases derived from stored state (never from
   a clock read at render time) is what keeps the output block Moore-pure.
+- **Static files are `Cache-Control: no-cache`** (added 2026-08-22, M8). aiohttp
+  sends `ETag`/`Last-Modified` but no `Cache-Control`, and a response without one
+  gets *heuristic* freshness — browsers reuse it for roughly 10% of its age
+  since `Last-Modified` without asking, so a month-old stylesheet is served from
+  disk for about three days. That is how a phone comes to run a new
+  `index.html` against an old `styles.css`, which is not hypothetical: it made
+  the M8 pool-heat banner announce a heater that was off (see 5.1). `no-cache`
+  means revalidate, not don't-store: the browser still caches and still sends
+  `If-None-Match`, and the bridge answers `304` with no body — measured at 0
+  bytes against 6.4 kB for `index.html`. An update the family has to hard-reload
+  is not an update.
 - **Config file** (`bridge/config.json`): adapter IP (or UDP auto-discover),
   HTTP port, friendly-name → circuit-ID map (discovered once via
   `screenlogicpy` CLI at setup), setpoint bounds, poll intervals.
@@ -642,7 +653,7 @@ the policy that follows from it:
 |---|---|---|
 | heater acts on body | always `"spa"` | spa if the spa circuit is on, else pool |
 | heater controls shown | only while the spa circuit is on | always |
-| "pool heater is running" banner | when the pool heater is on and the spa is off | never — it shows the control |
+| pool-heat banner | `"running"` / `"armed"` / none, while the spa is off | never — it shows the control |
 
 **Why the default view cannot heat the pool.** The heater's body used to come
 from a free-floating `activeBody(pool)`, re-derived at four call sites, which
@@ -674,6 +685,27 @@ heater section are mutually exclusive by construction, since one needs the spa
 circuit on and the other needs it off. This is the only place the spa view names
 the pool body, and it is safe by direction — the policy pins *activation* to the
 spa, while the banner only ever sends `on: false`.
+
+**`on` is not `active`, and the banner must not confuse them.** `heat.<body>.on`
+is `heat_mode != OFF` — the heater is *armed*; `heat.<body>.active` is
+`heat_state != OFF` — it is *firing*. The banner first shipped testing `on`
+while saying "is running", which is a standing false alarm on any pool whose
+heat mode is simply left set. It now reports the two separately: `"running"`
+("heating the whole pool") and `"armed"` ("it will heat the pool when the pump
+runs"). Both offer the off switch, because armed still means it fires the next
+time the pump runs.
+
+**The banner ships hidden in markup, not by a stylesheet rule.** Its first
+version relied on `.pool-heat-banner { display: none }` and carried its message
+as static HTML, so a browser holding a cached pre-M8 `styles.css` — which has no
+such rule — rendered the message unconditionally, announcing a pool heater that
+was not on. Visibility is now the `hidden` class (old enough to be in any cached
+stylesheet) applied in the markup, and `render` supplies the text, so an
+unstyled banner is an empty hidden div rather than a false claim. The general
+lesson for this app: a conditionally-shown element must not depend on a *new*
+CSS rule for its default state. The underlying cause — static files served with
+no `Cache-Control` — is fixed in §3, but the defensive markup stays: it costs
+nothing and it is what makes the element correct before `render` runs at all.
 
 **Setpoint bounds come from `/api/config`.** They were a constant in
 `controls.js` hand-copied from `config.json`. The bridge enforces its own value
@@ -788,5 +820,14 @@ everything under `app/`, and DEPLOY copies only `app/` and `bridge/` to the Pi.
    snapshot (5.1). A banner surfaces a pool heater lit elsewhere, which the new
    view would otherwise hide. Setpoint bounds now come from `/api/config`
    instead of a constant hand-copied from `config.json`.
+
+   Two follow-up fixes after the first deploy: that banner announced a pool
+   heater that was off, for two independent reasons — it hid itself with a
+   `display:none` that a cached pre-M8 stylesheet did not have, and it read
+   `heat.pool.on` (heat mode armed) while saying "running" (heat state firing).
+   It now ships `hidden` in the markup with its text supplied by `render`, and
+   reports armed and running as the different facts they are. The cache
+   mismatch that exposed it is closed by `Cache-Control: no-cache` on static
+   files (§3).
 
 Each milestone is independently demonstrable; M1–M3 require no pool access.

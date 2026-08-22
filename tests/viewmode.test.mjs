@@ -58,11 +58,14 @@ test("unrelated query strings do not change the view", () => {
 // answer "pool": spa off, spa off with the pool circuit running, and the
 // partial snapshots that exist before the first poll lands.
 const SNAPSHOTS = {
-  "spa on": { circuits: { spa: true, pool: false }, heat: { pool: { on: false }, spa: { on: true } } },
-  "spa off, pool circulating": { circuits: { spa: false, pool: true }, heat: { pool: { on: false }, spa: { on: false } } },
-  "spa off, pool heater on": { circuits: { spa: false, pool: true }, heat: { pool: { on: true }, spa: { on: false } } },
-  "everything off": { circuits: { spa: false, pool: false }, heat: { pool: { on: false }, spa: { on: false } } },
-  "circuits missing": { heat: { pool: { on: false }, spa: { on: false } } },
+  "spa on": { circuits: { spa: true, pool: false }, heat: { pool: { on: false, active: false }, spa: { on: true, active: true } } },
+  "spa off, pool circulating": { circuits: { spa: false, pool: true }, heat: { pool: { on: false, active: false }, spa: { on: false, active: false } } },
+  // heat_mode set but not firing — the resting configuration on a pool whose
+  // heat mode is simply left on. NOT "running".
+  "spa off, pool heat armed": { circuits: { spa: false, pool: true }, heat: { pool: { on: true, active: false }, spa: { on: false, active: false } } },
+  "spa off, pool heat firing": { circuits: { spa: false, pool: true }, heat: { pool: { on: true, active: true }, spa: { on: false, active: false } } },
+  "everything off": { circuits: { spa: false, pool: false }, heat: { pool: { on: false, active: false }, spa: { on: false, active: false } } },
+  "circuits missing": { heat: { pool: { on: false, active: false }, spa: { on: false, active: false } } },
   "empty object": {},
   "null": null,
   "undefined": undefined,
@@ -90,24 +93,39 @@ test("SPA mode shows the heater only while the spa circuit is on", () => {
   }
 });
 
-test("SPA mode warns only when the pool heater is on and the spa is off", () => {
+// Regression: the banner said "the pool heater is running" while it was not.
+// It tested `on`, which is heat_mode != OFF — armed, not burning — so any pool
+// whose heat mode is simply left set showed a standing false alarm.
+test("SPA mode tells armed apart from running", () => {
   const spa = policyFor(ViewMode.SPA);
+  const expected = {
+    "spa off, pool heat armed": "armed",
+    "spa off, pool heat firing": "running",
+  };
   for (const [label, pool] of Object.entries(SNAPSHOTS)) {
     assert.equal(
-      spa.warnPoolHeat(pool),
-      label === "spa off, pool heater on",
-      `${label}: the warning must not fire`
+      spa.poolHeatWarning(pool),
+      expected[label] ?? null,
+      `${label}: wrong warning`
     );
   }
 });
 
+test("an armed-but-idle pool heater is never called running", () => {
+  const spa = policyFor(ViewMode.SPA);
+  const armed = { circuits: { spa: false }, heat: { pool: { on: true, active: false } } };
+  assert.notEqual(spa.poolHeatWarning(armed), "running");
+  // Still worth surfacing: it fires the next time the pump runs.
+  assert.equal(spa.poolHeatWarning(armed), "armed");
+});
+
 test("the heater section and the pool-heat warning are mutually exclusive", () => {
   // They share the heater command instance, so they must never be on screen
-  // together. showHeater needs the spa circuit on; warnPoolHeat needs it off.
+  // together. showHeater needs the spa circuit on; the warning needs it off.
   const spa = policyFor(ViewMode.SPA);
   for (const [label, pool] of Object.entries(SNAPSHOTS)) {
     assert.ok(
-      !(spa.showHeater(pool) && spa.warnPoolHeat(pool)),
+      !(spa.showHeater(pool) && spa.poolHeatWarning(pool) !== null),
       `${label}: both visible at once`
     );
   }
@@ -128,7 +146,7 @@ test("POOL mode always shows the heater and never warns", () => {
   for (const [label, pool] of Object.entries(SNAPSHOTS)) {
     assert.equal(full.showHeater(pool), true, label);
     // It renders the pool heater control itself; a banner would be noise.
-    assert.equal(full.warnPoolHeat(pool), false, label);
+    assert.equal(full.poolHeatWarning(pool), null, label);
   }
 });
 

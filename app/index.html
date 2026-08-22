@@ -19,9 +19,14 @@
   <div id="status-banner" class="status-banner"></div>
   <div id="freeze-banner" class="freeze-banner" role="status"></div>
   <!-- Spa-only view: a pool heater lit elsewhere would otherwise be invisible
-       here, since that view hides the heater controls entirely. -->
-  <div id="pool-heat-banner" class="pool-heat-banner" role="status">
-    <span>The pool heater is running — heating the whole pool.</span>
+       here, since that view hides the heater controls entirely.
+       Ships with `hidden` and no message: render supplies both. It must not be
+       able to claim anything before render has looked at the pool, and relying
+       on a display:none in this release's own stylesheet was not enough — a
+       browser holding a cached pre-M8 styles.css showed the message
+       unconditionally. `.hidden` predates M8, so a stale sheet still has it. -->
+  <div id="pool-heat-banner" class="pool-heat-banner hidden" role="status">
+    <span id="pool-heat-text"></span>
     <button id="btn-pool-heat-off" class="pool-heat-off">Turn it off</button>
   </div>
   <button id="reconnect-btn" class="reconnect-btn hidden">Reconnect</button>
