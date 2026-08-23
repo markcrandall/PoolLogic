@@ -64,7 +64,8 @@ class MockBackend:
         self._last_contact_mono = time.monotonic()
         self._temps = {"air": 88.0, "pool": 84.0, "spa": 84.0}
         self._circuits = {
-            "pool": True,   # read-only in the API; drives pool-temp freshness
+            "pool": True,   # a real body circuit now: settable, and it drives
+                            # pool-temp freshness
             "spa": False,
             "jets": False,
             "cleaner": False,
@@ -113,7 +114,15 @@ class MockBackend:
 
             self._pump_watts = _walk(self._pump_watts, 25, 1350, 1550)
             self._temps["air"] = _walk(self._temps["air"], 0.3, 75, 95)
-            self._temps["pool"] = _walk(self._temps["pool"], 0.1, 80, 88)
+            # The controller only measures flowing water, so an idle body's
+            # reading is frozen at whatever it was when the body last
+            # circulated — which is exactly what the client's "last reading"
+            # hint claims. While the pool circuit was pinned on this could
+            # never diverge; now that it is settable, a pool temperature that
+            # kept drifting with the pump off would make that hint a lie in
+            # the one place it is easiest to check.
+            if self._circuits["pool"]:
+                self._temps["pool"] = _walk(self._temps["pool"], 0.1, 80, 88)
 
             # Spa heats toward setpoint when spa + heater are on, else relaxes
             # toward pool temperature.
@@ -220,9 +229,22 @@ class MockBackend:
 
     # -- Commands ---------------------------------------------------------
 
+    # The two body circuits are mutually exclusive: one set of plumbing, and
+    # the panel rotates the valves rather than running both. Modeled here
+    # because the client depends on it — selecting Spa sends no pool write at
+    # all, on the grounds that the panel drops the pool circuit itself. Without
+    # the interlock the mock is the one place that assumption looks fine.
+    OTHER_BODY = {"pool": "spa", "spa": "pool"}
+
     async def set_circuit(self, name, on):
         self._command_gate()
-        self._apply_later(lambda: self._circuits.__setitem__(name, bool(on)))
+
+        def apply():
+            self._circuits[name] = bool(on)
+            if on and name in self.OTHER_BODY:
+                self._circuits[self.OTHER_BODY[name]] = False
+
+        self._apply_later(apply)
 
     async def heat_on(self, body, setpoint):
         self._command_gate(heat=True)

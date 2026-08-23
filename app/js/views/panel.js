@@ -4,7 +4,7 @@
 import { ConnState, ConnEvent, MAX_ATTEMPTS } from "../fsm/connection.js";
 import { CmdState } from "../fsm/command.js";
 import { LoadState } from "../fsm/load.js";
-import { CONTROLS } from "../controls.js";
+import { CONTROLS, MODES } from "../controls.js";
 import { policy } from "../viewmode.js";
 import { createResource } from "../resource.js";
 import { fetchConfig } from "../api.js";
@@ -195,19 +195,22 @@ function renderControls(pool, commands, setpointDraft, live, limits) {
   const body = policy().body(pool);
 
   // Mode switch — displayed value is the pool's truth; pending shows on the
-  // tapped (target) side.
-  const mode = usable ? CONTROLS.mode.read(pool) : "pool";
+  // tapped (target) side. Three positions, because both bodies off is a state
+  // the panel really has; rendering it as Pool claimed the pool was running
+  // when nothing was.
+  //
+  // Nothing is lit with no snapshot in hand, which is why this is null rather
+  // than a default position: the old "pool" fallback lit POOL through booting
+  // and every offline window, on no evidence at all.
+  const mode = usable ? CONTROLS.mode.read(pool) : null;
   const modeCmd = cmd("mode");
-  setButton("btn-mode-pool", {
-    active: mode === "pool",
-    pending: pending("mode") && modeCmd.target === "pool",
-    enabled: usable && !pending("mode"),
-  });
-  setButton("btn-mode-spa", {
-    active: mode === "spa",
-    pending: pending("mode") && modeCmd.target === "spa",
-    enabled: usable && !pending("mode"),
-  });
+  for (const target of MODES) {
+    setButton(`btn-mode-${target}`, {
+      active: mode === target,
+      pending: pending("mode") && modeCmd.target === target,
+      enabled: usable && !pending("mode"),
+    });
+  }
 
   // Heater toggle + setpoint stepper. Both are locked while a mode change is
   // pending (the active body is about to flip) and the stepper/slider also lock
@@ -310,6 +313,15 @@ function freezeBlocks(pool, turningOff) {
   return !window.confirm(FREEZE_CONFIRM);
 }
 
+// Whether a mode tap will stop a body that is currently running — the only
+// thing freeze protection cares about. Spa is pure activation and never asks.
+function modeStopsABody(pool, target) {
+  const spa = !!pool?.circuits?.spa;
+  if (target === "spa") return false;
+  if (target === "pool") return spa;
+  return spa || !!pool?.circuits?.pool;
+}
+
 export function bindHandlers() {
   const on = (id, fn) => document.getElementById(id).addEventListener("click", fn);
 
@@ -340,14 +352,17 @@ export function bindHandlers() {
   slider.addEventListener("pointerup", endDrag);
   slider.addEventListener("pointercancel", endDrag);
 
-  // Leaving Spa switches the spa circuit off, so it goes through the same
-  // guard as the plain toggles. Entering Spa only turns things on.
-  on("btn-mode-pool", () => {
-    const pool = store.getState().pool;
-    if (freezeBlocks(pool, pool?.circuits?.spa)) return;
-    tapControl("mode", "pool");
-  });
-  on("btn-mode-spa", () => tapControl("mode", "spa"));
+  // Two of the three positions switch a body circuit off, so they go through
+  // the same guard as the plain toggles; Spa only turns things on. Which body
+  // each one stops differs, and the guard asks only when this tap will really
+  // stop something: Pool drops the spa, Off drops whichever body is running.
+  for (const target of MODES) {
+    on(`btn-mode-${target}`, () => {
+      const pool = store.getState().pool;
+      if (freezeBlocks(pool, modeStopsABody(pool, target))) return;
+      tapControl("mode", target);
+    });
+  }
   on("btn-heater", () => {
     const pool = store.getState().pool;
     if (!pool) return;

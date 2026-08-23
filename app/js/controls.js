@@ -18,39 +18,77 @@ const circuit = (id) => ({
   send: (target) => postJson(`api/circuit/${id}`, { on: target }),
 });
 
+// The three positions of the body switch, in display order. Exported so the
+// view renders exactly the set the control understands.
+export const MODES = Object.freeze(["pool", "spa", "off"]);
+
+// The two body circuits have three real states, not two. Both can be off — the
+// panel reaches that on its own, and the vendor's ScreenLogic app reaches it by
+// pressing the lit body again — so reading "pool" as merely the absence of spa
+// lit POOL whenever nothing at all was running, and offered no way back to it.
+// Same derive-from-absence shape as the heater-body bug in DESIGN.md 5.1.
+//
+// Both-on is not a state the panel produces; the bodies interlock. If one is
+// ever reported anyway, "spa" is the truthful answer — it is the hot body, and
+// the one whose courtesy heat this control is responsible for shutting off.
+const bodyMode = (pool) =>
+  pool.circuits.spa ? "spa" : pool.circuits.pool ? "pool" : "off";
+
 export const CONTROLS = {
   mode: {
     id: "mode",
-    read: (pool) => (pool.circuits.spa ? "spa" : "pool"),
+    read: bodyMode,
     // App-owned courtesy heat (replaces the panel's "Spa Manual Heat", which
     // re-asserts heat and makes Heater-Off not stick): selecting Spa also
-    // starts the heater to the spa setpoint, once; leaving Spa turns it off.
-    // Both POSTs are awaited sequentially so a heat failure fails the whole
-    // command (toast) instead of being silently swallowed, and the circuit
-    // change always lands before the heat change.
+    // starts the heater to the spa setpoint, once; leaving Spa — for either of
+    // the other two positions — turns it off. Every POST is awaited
+    // sequentially so a failure anywhere fails the whole command (toast)
+    // instead of being silently swallowed, and the circuit change always lands
+    // before the heat change.
+    //
+    // Pool and Off send the spa circuit and its heat down unconditionally,
+    // even when the snapshot already says both are off. The snapshot is up to
+    // one poll old, and a redundant off costs a write where a skipped one can
+    // leave the spa heating with the body cold.
     send: async (target, pool) => {
-      const entering = target === "spa";
-      const circuit = await postJson("api/circuit/spa", { on: entering });
-      if (!circuit.ok) return circuit;
-      if (entering) {
+      if (target === "spa") {
+        const circuit = await postJson("api/circuit/spa", { on: true });
+        if (!circuit.ok) return circuit;
         const setpoint = pool.heat.spa.setpoint;
         if (setpoint == null) return circuit;
         return postJson("api/heat/spa/on", { setpoint });
       }
-      return postJson("api/heat/spa/off", {});
+      const circuit = await postJson("api/circuit/spa", { on: false });
+      if (!circuit.ok) return circuit;
+      const heat = await postJson("api/heat/spa/off", {});
+      if (!heat.ok) return heat;
+      // The only place Pool and Off differ. Entering Spa deliberately sends no
+      // pool write: the panel's own interlock drops that circuit, and read()
+      // answers "spa" whether or not it has caught up yet.
+      return postJson("api/circuit/pool", { on: target === "pool" });
     },
-    // Two writes, so "done" has to mean both landed. Without this the default
-    // predicate (read(pool) === target) watched the circuit alone: a poll
-    // confirming the spa circuit could beat the heat POST, move the command to
-    // IDLE, and leave failIfCurrent with nothing to fail — the switch reported
-    // success while the courtesy heat, the whole reason this is one command,
-    // silently never happened. Mirrors send()'s own branches, including the
-    // one where a null setpoint means no heat POST was ever issued.
+    // Two or three writes, so "done" has to mean all of them landed. Without
+    // this the default predicate (read(pool) === target) watched the circuits
+    // alone: a poll confirming the spa circuit could beat the heat POST, move
+    // the command to IDLE, and leave failIfCurrent with nothing to fail — the
+    // switch reported success while the courtesy heat, the whole reason this
+    // is one command, silently never happened. Mirrors send()'s own branches,
+    // including the one where a null setpoint means no heat POST was issued.
+    //
+    // Not expressed as read(pool) === target plus extras: Pool and Off differ
+    // only in the pool circuit, and both require the spa side fully down, so
+    // saying that once is one fact instead of two that can disagree.
     confirmed: (pool, target) => {
-      const entering = target === "spa";
-      if (pool.circuits.spa !== entering) return false;
-      if (entering && pool.heat.spa.setpoint == null) return true;
-      return pool.heat.spa.on === entering;
+      if (target === "spa") {
+        if (!pool.circuits.spa) return false;
+        if (pool.heat.spa.setpoint == null) return true;
+        return pool.heat.spa.on === true;
+      }
+      return (
+        !pool.circuits.spa &&
+        !pool.heat.spa.on &&
+        pool.circuits.pool === (target === "pool")
+      );
     },
   },
   // Heater and setpoint targets carry the body captured at tap time, so a

@@ -54,7 +54,7 @@ icon and title on iOS/Android.
 
 | Control | UI | Maps to |
 |---|---|---|
-| Pool / Spa mode | two-position switch | spa circuit on/off (panel handles valve interlock) |
+| Pool / Spa mode | three-position switch: **Pool / Spa / Off** | the two body circuits (panel handles valve interlock). Both off is a real panel state, not the absence of one — see 5.2 |
 | Heater | On/Off toggle + setpoint stepper per active body | heat mode Off(0) / Heater(3); SetHeatPoint |
 | Spa auto-heat | selecting Spa mode also sends heater-on (spa setpoint); leaving Spa sends heater-off. App-owned so a mid-session Heater-Off sticks. REQUIRES disabling the panel's "Spa Manual Heat" setting (verified 2026-07-22: with it enabled the controller re-asserts heat ~15s after any off command while the spa circuit is on) | app-side, in the mode control's send |
 | Setpoint bounds | 40–102 °F, enforced bridge-side; the UI clamp now **reads them from `/api/config`** rather than mirroring the number by hand, so a `config.local.json` override cannot desync the two (M8). Range lowered from 75 on 2026-07-22 to match the pool body's real setpoint range | |
@@ -65,7 +65,7 @@ icon and title on iOS/Android.
 | Pool light | toggle | pool light circuit |
 | Spa light | toggle | spa light circuit |
 | Light show | picker: **White** (non-color) / **Caribbean** / **Party** (added 2026-07-22) | IntelliBrite color command (applies to IntelliBrite lights collectively) |
-| Temperatures | read-only banner: air / pool / spa; a water temp renders muted with a "last reading" hint while its body isn't circulating (the controller only measures flowing water, so idle-body temps are frozen at the last circulated reading) | polled; pool circuit (505) is in the payload read-only to drive this |
+| Temperatures | read-only banner: air / pool / spa; a water temp renders muted with a "last reading" hint while its body isn't circulating (the controller only measures flowing water, so idle-body temps are frozen at the last circulated reading) | polled; the pool circuit (505) drives this, and since 5.2 it is settable rather than read-only |
 | Com status | header dot + banners; manual Reconnect when offline | see Connection FSM |
 
 No solar modes, no schedules, no chemistry — out of scope by decision.
@@ -236,7 +236,7 @@ GET  /api/state → {
   poolAgeSeconds: 0,  // age of the readings below (monotonic, bridge-side)
   freezeMode: bool,   // panel-level freeze protection is engaged
   airTemp: 88, poolTemp: 84, spaTemp: 101,
-  circuits: { pool: bool,   // read-only: drives pool-temp staleness
+  circuits: { pool: bool,   // also drives pool-temp staleness
               spa: bool, jets: bool, cleaner: bool, spillway: bool,
               poolLight: bool, spaLight: bool },
   heat: { pool: { setpoint: 78, on: bool, active: bool },
@@ -250,7 +250,11 @@ POST /api/heat/{body}/setpoint  {"temp": 101}         → setpoint only (config 
 POST /api/lights                {"show": "white" | "caribbean" | "party"}
 ```
 
-`{name}` ∈ spa, jets, cleaner, spillway, poolLight, spaLight.
+`{name}` ∈ pool, spa, jets, cleaner, spillway, poolLight, spaLight — every circuit
+`config.json` names. `pool` was rejected until 5.2, when the body switch grew a
+position that has to start it; `/api/config` still reports `settableCircuits`
+separately so the config page can flag any future read-only circuit rather than
+letting it surface as a 404.
 `{body}` ∈ pool, spa. Unknown names → 404. Out-of-bounds temp → 400.
 
 Mock-only: `POST /api/mock/freeze {"on": bool}`, `POST /api/mock/alarm
@@ -390,8 +394,9 @@ The flag is **controller-level, not per-circuit** — the panel reports that it
 is protecting itself, never which circuits it forced on. So affected toggles
 can't be selectively disabled without guessing. Instead, while freeze is
 active, every *off*-tap confirms first (on-taps are never the hazard). This
-covers the plain circuit toggles and Pool mode, which switches the spa
-circuit off.
+covers the plain circuit toggles and the two body-switch positions that stop a
+body — Pool, which stops the spa, and Off, which stops whichever body is
+running. Spa is pure activation and never asks.
 
 ---
 
@@ -621,7 +626,7 @@ tabs.
 ├────────────────────────────────────┤
 │  Air 88°   Pool 84°   Spa 101°     │   ← greyed + "as of 2:03 PM" when stale
 ├────────────────────────────────────┤
-│  Mode      [ POOL ]■[ SPA ]        │   ← two-position switch
+│  Mode      [ POOL ][ SPA ][ OFF ]   │   ← three-position switch, see 5.2
 │  Heater    [ OFF/ON ]  ◄ 101° ►    │   ← stepper for active body, 40–102
 │  Jets      [ OFF/ON ]              │
 │  Cleaner   [ OFF/ON ]              │
@@ -717,6 +722,83 @@ pair and the slider bounds are rendered from it rather than set once at bind
 time. A malformed payload is refused rather than allowed to install `NaN`,
 which would make the clamp pass anything.
 
+### 5.2 The body switch has three positions (added 2026-08-22, M9)
+
+The vendor's ScreenLogic app treats Pool and Spa as ordinary toggles: press the
+lit one again and that body turns off. So the panel has three states the app has
+to be able to both *show* and *reach* — pool running, spa running, and neither.
+
+The switch shipped with two positions over those three states, and derived one
+of them from the absence of the other:
+
+```js
+read: (pool) => (pool.circuits.spa ? "spa" : "pool")   // before
+```
+
+Two failures follow, and they are the same failure twice:
+
+- **It lit POOL when nothing was running.** Both bodies off is the panel's
+  resting state, and the app rendered it as the pool circulating.
+- **It could not stop the pool, or start it.** Tapping Pool posted
+  `circuit/spa {on:false}` and nothing else — "Pool" meant *not spa*. The pool
+  circuit was on the bridge's `READ_ONLY_CIRCUITS` list, so no command could
+  reach it at all.
+
+This is the shape of the 5.1 bug — a state inferred from the absence of another
+rather than read from its own evidence — and it is worth naming as a class,
+because both times the wrong answer was the *safe-sounding* one. `read` now asks
+each circuit about itself:
+
+| `circuits.pool` | `circuits.spa` | position |
+|---|---|---|
+| false | false | `off` |
+| true | false | `pool` |
+| — | true | `spa` |
+
+Spa wins a both-on reading. The panel interlocks the bodies so it should not
+occur, but if it is ever reported, spa is the honest answer: it is the hot body,
+and the one whose courtesy heat this control is on the hook to shut off. Saying
+"pool" there would hide a running spa heater behind the pool position.
+
+**What each position writes.** Spa is two writes (circuit, then courtesy heat);
+Pool and Off are three, differing only in the last:
+
+| position | spa circuit | spa heat | pool circuit |
+|---|---|---|---|
+| Spa | on | on, at the spa setpoint | *not sent* — the panel's interlock drops it |
+| Pool | off | off | on |
+| Off | off | off | off |
+
+Pool and Off drive the spa side down even when the snapshot already says it is
+down. The snapshot is up to one poll old, and a redundant off costs a write
+where a skipped one can leave the spa heating with the body cold.
+
+`confirmed()` mirrors those branches, for the reason 4.2 gives: a command that
+writes three times is not confirmed by one of them landing. The old predicate
+accepted Pool the moment the spa went down — which was consistent with the old
+control, where that *was* the whole command, and is why the new write is exactly
+the one a stale predicate would skip. `tests/mode.test.mjs` sweeps all four
+circuit combinations rather than the two that used to be reachable.
+
+**With no snapshot, no position is lit.** The old output logic defaulted to
+`"pool"` while booting and through every offline window, asserting a running
+pool on no evidence at all. It renders nothing lit now, which is the truthful
+answer to "which body is running" when the answer is unknown.
+
+**The pool circuit is settable now** (`bridge.py` — `READ_ONLY_CIRCUITS` is
+gone). This does not reopen 5.1: that is about the pool *heater*, and the
+heater-body resolver is untouched. On `/` the heater section stays hidden until
+the spa circuit is on, so the default view still cannot heat the pool — it can
+only start and stop the pump serving it, which is what a body switch is.
+
+**The mock now models the interlock**, because the client depends on it:
+selecting Spa deliberately sends no pool write, on the grounds that the panel
+drops that circuit itself. Without the interlock in `mock.py`, the mock is the
+one place that assumption would look fine. It also freezes the pool temperature
+while that circuit is off — the reading really is frozen, and the pool circuit
+being pinned on was the only reason the "last reading" hint could not be checked
+in dev.
+
 ### File layout
 
 ```
@@ -761,6 +843,7 @@ PoolLogic/
 └── tests/                      # node --test ; python -m unittest discover -s tests  (from the repo root)
     ├── connection.fsm.test.mjs, command.fsm.test.mjs, load.fsm.test.mjs
     ├── viewmode.test.mjs       # routing + "SPA mode never resolves the pool body"
+    ├── mode.test.mjs           # the Pool/Spa/Off switch over all four circuit states
     ├── schedule.test.mjs       # timer plan + poll guard
     ├── store.test.mjs          # the state register's two real-world rules
     ├── design.doc.test.mjs     # 4.1 / 4.3 drift check against the code
@@ -829,5 +912,20 @@ everything under `app/`, and DEPLOY copies only `app/` and `bridge/` to the Pi.
    reports armed and running as the different facts they are. The cache
    mismatch that exposed it is closed by `Cache-Control: no-cache` on static
    files (§3).
+
+9. **M9 — the body switch was two positions over three states**: the vendor's
+   ScreenLogic app turns a body off by pressing the lit one again, which means
+   the panel has a both-off state the app could neither show nor reach. `mode`
+   read `spa ? "spa" : "pool"`, so the pool position was the *absence* of spa:
+   it lit POOL whenever nothing at all was running, and tapping it only stopped
+   the spa — the pool circuit was on the bridge's read-only list, so no command
+   could start or stop it. The same derive-from-absence shape as M8, and both
+   times the wrong answer was the safe-sounding one. The switch is now Pool /
+   Spa / Off, each position read from its own circuit, with `confirmed()`
+   covering the third write the old predicate never had to make. The pool
+   circuit is settable; the heater-body resolver is untouched, so the default
+   view still cannot heat the pool (5.2). The mock gained the body interlock the
+   client depends on, and freezes the pool temperature while that circuit is
+   off, which the pinned-on pool circuit had made untestable.
 
 Each milestone is independently demonstrable; M1–M3 require no pool access.

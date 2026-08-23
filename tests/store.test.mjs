@@ -199,6 +199,29 @@ test("leaving spa is not confirmed until the spa heat is actually off", () => {
   assert.equal(store.getCommand("mode").state, CmdState.IDLE);
 });
 
+// The third position. Turning both bodies off is three writes — spa circuit,
+// spa heat, pool circuit — and the last of them is the one the two-position
+// switch never had, so it is the one a stale predicate would skip.
+test("Off stays PENDING until the pool circuit is down too", () => {
+  reset();
+  store.dispatchConn(ConnEvent.POLL_OK, payload()); // pool running, spa off
+  store.dispatchCommand("mode", CmdEvent.TAP, "off");
+
+  // Spa side settled, pool circuit still on: the equipment is still running.
+  store.dispatchConn(ConnEvent.POLL_OK, withCircuit("spa", false));
+  assert.equal(
+    store.getCommand("mode").state,
+    CmdState.PENDING,
+    "a pool circuit still on means the pool is not off"
+  );
+
+  store.dispatchConn(
+    ConnEvent.POLL_OK,
+    payload({ circuits: { ...payload().circuits, pool: false } })
+  );
+  assert.equal(store.getCommand("mode").state, CmdState.IDLE);
+});
+
 test("a null spa setpoint confirms on the circuit alone", () => {
   reset();
   // send() skips the heat POST entirely when there is no setpoint to send, so

@@ -41,10 +41,6 @@ APP_DIR = BRIDGE_DIR.parent / "app"
 BODIES = ("pool", "spa")
 SHOWS = ("white", "caribbean", "party")
 
-# The pool circuit is exposed read-only in /api/state (it drives temp
-# staleness); it is never settable through the API.
-READ_ONLY_CIRCUITS = ("pool",)
-
 
 def bad_request(message):
     return web.json_response({"error": message}, status=400)
@@ -68,9 +64,13 @@ class Api:
         self.config = config
         # Settable circuits derive from config so the whitelist and the
         # backend's ID map can never drift apart.
-        self.circuits = tuple(
-            name for name in config["circuitIds"] if name not in READ_ONLY_CIRCUITS
-        )
+        #
+        # Every circuit config.json names is settable, the pool body included.
+        # It was held read-only while the client had a two-position body switch
+        # that only ever needed to stop the spa and treated "spa off" as "pool
+        # on". Both bodies can in fact be off, so selecting Pool now has to
+        # actually start it — see DESIGN.md 5.2.
+        self.circuits = tuple(config["circuitIds"])
 
     def routes(self):
         return [
@@ -97,8 +97,10 @@ class Api:
         return web.json_response(
             {
                 "circuitIds": self.config["circuitIds"],
-                # Which of those the API will actually accept a command for;
-                # 'pool' is read-only (it drives temp staleness).
+                # Which of those the API will actually accept a command for.
+                # Currently all of them; kept as its own field because the
+                # config page renders it and a future read-only circuit should
+                # show up there rather than as a surprise 404.
                 "settableCircuits": list(self.circuits),
                 "setpointMin": self.config["setpointMin"],
                 "setpointMax": self.config["setpointMax"],
