@@ -1,5 +1,5 @@
 {
-  "adapterIp": "192.168.1.25",
+  "adapterIp": "192.168.1.55",
   "httpPort": 8080,
   "setpointMin": 40,
   "setpointMax": 102,

@@ -11,7 +11,7 @@ it within ~2s, and every slower sample fell in the gap afterwards. Anything
 polling on the bridge's cadence (10s) or the client's (5s) cannot see that.
 
     python bridge/watch_circuits.py                  # adapterIp from config
-    python bridge/watch_circuits.py 192.168.1.25
+    python bridge/watch_circuits.py 192.168.1.55
     python bridge/watch_circuits.py --seconds 600
 
 Read-only: it never sends a command. To test a command, issue it from the app

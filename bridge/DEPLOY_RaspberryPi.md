@@ -71,7 +71,7 @@ lets us preconfigure wifi and SSH so the Pi never needs a keyboard or monitor.
    ```
 
 5. **Reserve the Pi's IP address** in your router's DHCP settings now, and do
-   the same for the pool adapter (192.168.1.25) if you haven't — the bridge
+   the same for the pool adapter (192.168.1.55) if you haven't — the bridge
    config points at that address, and a DHCP change would break it. While
    you're in the router, note the Pi's reserved IP; it becomes the family URL.
 
@@ -110,7 +110,7 @@ slots), then:
 /home/pi/PoolLogic/.venv/bin/python /home/pi/PoolLogic/bridge/bridge.py
 ```
 
-You should see `PoolLogic bridge (REAL pool at 192.168.1.25) on
+You should see `PoolLogic bridge (REAL pool at 192.168.1.55) on
 http://localhost:8080`. From a phone or the PC, open:
 
 ```
@@ -121,7 +121,7 @@ Green dot, live temps, working controls = success. (For a no-equipment dry
 run, add `--mock` and look for the amber MOCK badge.) Ctrl+C to stop.
 
 If the dot goes amber with "Pool link down": check the adapter answers
-`ping 192.168.1.25` from the Pi; if not, power-cycle the ScreenLogic adapter
+`ping 192.168.1.55` from the Pi; if not, power-cycle the ScreenLogic adapter
 (they lock up occasionally — 10 seconds unplugged fixes it). If the adapter
 IP ever changes, rediscover it with:
 
@@ -218,7 +218,7 @@ stale-cache surprises).
 |---|---|
 | App unreachable from phones | `systemctl status poollogic`; `ss -tlnp \| grep 8080` on the Pi; phone on the same wifi? |
 | Live logs | `journalctl -u poollogic -f` |
-| Amber "Pool link down" persists | `ping 192.168.1.25` from the Pi; power-cycle the adapter; confirm the Pentair app isn't hogging connection slots |
+| Amber "Pool link down" persists | `ping 192.168.1.55` from the Pi; power-cycle the adapter; confirm the Pentair app isn't hogging connection slots |
 | Adapter moved to a new IP | rediscover (section 6) and edit `config.json`, then `sudo systemctl restart poollogic` |
 | Everything mysteriously wrong | `sudo reboot` — the service self-starts |
 
